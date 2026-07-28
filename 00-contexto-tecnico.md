@@ -10,7 +10,7 @@
 | Interruptor deslizable, carcasa impresa, argolla | Por definir en Fase 1 |
 | Cautín, multímetro, impresora 3D | Disponibles |
 
-## Pinout (validado, no cambiar sin discusión)
+## Pinout (validado y discutido — actualizado 2026-07-28)
 
 **Batería → XIAO (pads traseros):** Rojo a `BAT+` / `B+`, Negro a `BAT-` / `B-`.
 
@@ -18,16 +18,17 @@
 
 | Pantalla | XIAO | GPIO | Nota |
 |---|---|---|---|
-| VCC | 3V3 | — | Salida del regulador interno, alimentada por batería cuando no hay USB |
+| VCC | 3V3 | — | Salida del regulador interno |
 | GND | GND | — | |
-| DIN | D10 | GPIO10 | MOSI del SPI por hardware |
-| CLK | D8 | GPIO8 | SCK del SPI por hardware |
-| CS | D7 | GPIO7 | También UART0 TX; sin conflicto porque el serial va por USB nativo |
-| DC | D6 | GPIO6 | También UART0 RX; misma nota |
-| RST | D5 | GPIO5 | |
-| BUSY | D4 | GPIO4 | Entrada |
+| DIN | D5 | GPIO7 | MOSI del SPI por hardware |
+| CLK | D4 | GPIO6 | SCK del SPI por hardware |
+| CS | D10 | GPIO10 | |
+| DC | D7 | GPIO20 | |
+| RST | D3 | GPIO5 | RTC GPIO — se mantiene en LOW durante deep sleep |
+| BUSY | D2 | GPIO4 | RTC GPIO, entrada |
 
-DIN y CLK caen en el SPI por hardware del C3, así que el refresco es rápido y no por bit-banging. Es la asignación óptima.
+Pinout corregido el 2026-07-28 tras validar el mapeo D→GPIO real del XIAO
+ESP32C3 contra la documentación de Seeed; ver docs/decisiones.md D-001.
 
 ## Decisiones ya tomadas
 
