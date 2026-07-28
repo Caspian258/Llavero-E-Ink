@@ -38,15 +38,22 @@ Pantalla: Waveshare 1.54" E-Ink 200x200, blanco y negro, SPI, vía GxEPD2
 Pines:
 
 ```
-DIN  -> D10 (GPIO10, MOSI hardware)
-CLK  -> D8  (GPIO8, SCK hardware)
-CS   -> D7  (GPIO7)
-DC   -> D6  (GPIO6)
-RST  -> D5  (GPIO5)
-BUSY -> D4  (GPIO4)
+DIN  -> D5  (GPIO7)
+CLK  -> D4  (GPIO6)
+CS   -> D10 (GPIO10)
+DC   -> D7  (GPIO20)
+RST  -> D3  (GPIO5, RTC GPIO)
+BUSY -> D2  (GPIO4, RTC GPIO)
 VCC  -> 3V3
 GND  -> GND
 ```
+
+Nota: el mapeo D→GPIO del XIAO ESP32C3 no es lineal. D6 real es GPIO21 = U0TXD,
+usado por el bootloader ROM al arrancar; D8 real es GPIO8, pin de strapping.
+Ambos se evitan. RST y BUSY se colocan en pines RTC GPIO (GPIO5/GPIO4) porque
+el firmware necesita mantener RST en LOW durante el deep sleep vía
+`rtc_gpio_hold_en()` — pendiente de confirmar en Fase 1 si el módulo corta la
+alimentación del panel al hacerlo. Ver decisión D-001 en `decisiones.md`.
 
 ## Reglas de firmware
 
