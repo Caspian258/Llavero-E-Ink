@@ -7,7 +7,11 @@ D1/GPIO3 queda libre y reservado para gate de MOSFET.
 
 ## D-002 — Estrategia de sueño de la pantalla (2026-07-28)
 Antes del deep sleep: hibernación por software, RST enganchado en LOW vía
-rtc_gpio_hold_en(), y los seis pines en LOW. En módulos Waveshare recientes,
+gpio_hold_en() por pin + gpio_deep_sleep_hold_en() global (API correcto
+para ESP32-C3, que no implementa RTCIO clásico — confirmado contra
+soc_caps.h del SDK instalado y la documentación de Espressif durante la
+implementación del firmware de prueba en /firmware/test-consumo/), y los
+seis pines en LOW. En módulos Waveshare recientes,
 RST en LOW corta la lógica del level shifter y la alimentación del panel.
 Fallback si la medición supera 400 µA: P-MOSFET de canal P sobre VCC,
 siempre combinado con los pines en LOW (evitar alimentación fantasma por
