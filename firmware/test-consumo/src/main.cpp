@@ -6,7 +6,13 @@
 // Cambiar a 1, 2 o 3, volver a compilar y reflashear para cada medición.
 #define MODO_PRUEBA 1
 
+// En 1, usa DEEP_SLEEP_SEGUNDOS_DEV (sueño largo) para tener más margen de
+// flasheo por USB sin depender del botón BOOT. La medición real de consumo
+// (D-003) se hace siempre con MODO_DESARROLLO en 0, con el tiempo de producción.
+#define MODO_DESARROLLO 0
+
 #define DEEP_SLEEP_SEGUNDOS 60
+#define DEEP_SLEEP_SEGUNDOS_DEV 600
 
 #if MODO_PRUEBA == 2 || MODO_PRUEBA == 3
 
@@ -49,10 +55,17 @@ void imprimirCausaArranque() {
 }
 
 void entrarDeepSleep(int modo) {
-  Serial.printf("Durmiendo %ds, MODO %d\n", DEEP_SLEEP_SEGUNDOS, modo);
+#if MODO_DESARROLLO == 1
+  const int segundos = DEEP_SLEEP_SEGUNDOS_DEV;
+  Serial.println("Usando temporizador DEV (DEEP_SLEEP_SEGUNDOS_DEV)");
+#else
+  const int segundos = DEEP_SLEEP_SEGUNDOS;
+  Serial.println("Usando temporizador de producción (DEEP_SLEEP_SEGUNDOS)");
+#endif
+  Serial.printf("Durmiendo %ds, MODO %d\n", segundos, modo);
   Serial.flush();
   delay(150); // margen para que el mensaje salga completo por USB-CDC antes de dormir
-  esp_sleep_enable_timer_wakeup((uint64_t)DEEP_SLEEP_SEGUNDOS * 1000000ULL);
+  esp_sleep_enable_timer_wakeup((uint64_t)segundos * 1000000ULL);
   esp_deep_sleep_start();
 }
 
