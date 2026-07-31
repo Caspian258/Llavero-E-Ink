@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "driver/gpio.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 
 // Cambiar a 1, 2 o 3, volver a compilar y reflashear para cada medición.
 #define MODO_PRUEBA 1
@@ -35,8 +36,22 @@ void inicializarYDibujarPatron() {
 }
 #endif
 
-void entrarDeepSleep() {
+// Distingue arranque en frío de un retorno del deep sleep por timer,
+// necesario para no confundir mediciones entre modos al ver el log.
+void imprimirCausaArranque() {
+  if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+    bool porTimer = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+    Serial.printf("Causa de arranque: %s\n", porTimer
+      ? "temporizador de deep sleep" : "despertar de deep sleep (causa distinta a timer)");
+  } else {
+    Serial.println("Causa de arranque: encendido/reset manual");
+  }
+}
+
+void entrarDeepSleep(int modo) {
+  Serial.printf("Durmiendo %ds, MODO %d\n", DEEP_SLEEP_SEGUNDOS, modo);
   Serial.flush();
+  delay(150); // margen para que el mensaje salga completo por USB-CDC antes de dormir
   esp_sleep_enable_timer_wakeup((uint64_t)DEEP_SLEEP_SEGUNDOS * 1000000ULL);
   esp_deep_sleep_start();
 }
@@ -44,6 +59,7 @@ void entrarDeepSleep() {
 void setup() {
   Serial.begin(115200);
   delay(1500); // margen para que el monitor serie llegue a conectar antes de dormir
+  imprimirCausaArranque();
 
 #if MODO_PRUEBA == 1
   // Solo XIAO: ningún pin de la pantalla se declara ni se toca.
@@ -51,15 +67,13 @@ void setup() {
     Serial.printf("MODO 1: XIAO despierto (%d/3)\n", i);
     delay(300);
   }
-  Serial.println("MODO 1: durmiendo 60 s...");
-  entrarDeepSleep();
+  entrarDeepSleep(1);
 
 #elif MODO_PRUEBA == 2
   Serial.println("MODO 2: inicializando pantalla...");
   inicializarYDibujarPatron();
   display.hibernate(); // apaga el panel y pone su controlador en bajo consumo (hibernación por software)
-  Serial.println("MODO 2: pantalla hibernada, durmiendo 60 s...");
-  entrarDeepSleep();
+  entrarDeepSleep(2);
 
 #elif MODO_PRUEBA == 3
   Serial.println("MODO 3: inicializando pantalla...");
@@ -79,8 +93,7 @@ void setup() {
   gpio_hold_en((gpio_num_t)PIN_BUSY);  // congela el nivel LOW de BUSY durante el deep sleep
   gpio_deep_sleep_hold_en();           // habilita que los holds anteriores sobrevivan al deep sleep
 
-  Serial.println("MODO 3: RST y BUSY retenidos en LOW, durmiendo 60 s...");
-  entrarDeepSleep();
+  entrarDeepSleep(3);
 
 #else
   #error "MODO_PRUEBA debe ser 1, 2 o 3"
