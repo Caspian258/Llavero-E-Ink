@@ -4,7 +4,7 @@
 #include "esp_system.h"
 
 // Cambiar a 1, 2 o 3, volver a compilar y reflashear para cada medición.
-#define MODO_PRUEBA 1
+#define MODO_PRUEBA 3
 
 // En 1, usa DEEP_SLEEP_SEGUNDOS_DEV (sueño largo) para tener más margen de
 // flasheo por USB sin depender del botón BOOT. La medición real de consumo

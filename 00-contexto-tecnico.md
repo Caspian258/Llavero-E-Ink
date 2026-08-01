@@ -20,8 +20,8 @@
 |---|---|---|---|
 | VCC | 3V3 | — | Salida del regulador interno |
 | GND | GND | — | |
-| DIN | D5 | GPIO7 | MOSI del SPI por hardware |
-| CLK | D4 | GPIO6 | SCK del SPI por hardware |
+| DIN | D5 | GPIO7 | SPI por hardware, ruteado vía matriz de pines (no es el pin FSPI nativo; ese es GPIO10, ocupado por CS) |
+| CLK | D4 | GPIO6 | SPI por hardware, ruteado vía matriz de pines (el nativo, GPIO8, es strapping pin — se evita) |
 | CS | D10 | GPIO10 | |
 | DC | D7 | GPIO20 | |
 | RST | D3 | GPIO5 | RTC GPIO — se mantiene en LOW durante deep sleep |
