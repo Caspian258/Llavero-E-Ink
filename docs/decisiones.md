@@ -226,3 +226,95 @@ texto corto, texto largo multi-oración, y un texto deliberadamente
 gigante para forzar el camino de truncado). No se agregó ninguna
 dependencia nueva a `requirements.txt`: Pillow 12.3.0, ya fijada en
 D-016, cubre dithering, redimensionado y renderizado de texto TrueType.
+
+## D-019 — Webhook de Telegram: librería, seguridad y escritura atómica (2026-08-01)
+
+**Librería: `python-telegram-bot` v22.8 sobre llamadas HTTP crudas.**
+Se descarta reimplementar el webhook a mano (parseo de `Update`, manejo de
+`getFile`/descarga de fotos, `sendMessage`) porque la librería ya resuelve
+correctamente los casos borde del API de Telegram (versionado del schema,
+reintentos HTTP vía `httpx`, tipos fuertes para `Update`/`Message`/`File`)
+sin costo real: es Python puro (`python_telegram_bot-22.8-py3-none-any.whl`,
+sin compilación, wheel universal — no depende de la versión de Python del
+VPS como sí le pasaba a Pillow en D-016). Versión fijada tras instalarla en
+un venv de Python 3.12 (misma versión que el VPS de producción, D-007) y
+confirmar que resuelve desde wheel sin pasos de compilación.
+
+**Integración con el ciclo de vida de FastAPI — patrón documentado, no
+inventado.** Se siguió el ejemplo oficial de la librería
+`examples/customwebhookbot/starlettebot.py` (Starlette y FastAPI comparten
+el mismo contrato de `lifespan` de ASGI, así que el patrón traslada
+directo): `Application.builder().token(...).updater(None).build()` — se
+pasa `updater(None)` porque no se usa el `Updater` propio de la librería
+(ni su polling ni su servidor de webhook incorporado); las actualizaciones
+llegan por la ruta propia de FastAPI y se empujan a `update_queue`. El
+`lifespan` de FastAPI hace `async with telegram_application: await
+telegram_application.start(); yield; await telegram_application.stop()` —
+el `async with` inicializa (`initialize()`) y apaga (`shutdown()`) el bot;
+`start()`/`stop()` arrancan y frenan la tarea de fondo que consume
+`update_queue` y despacha a los handlers. Responder rápido (200) y dejar
+que el procesamiento (potencialmente lento: dithering, ajuste de tamaño de
+fuente, la llamada a `reply_text`) corra en la tarea de fondo es también el
+comportamiento correcto para un webhook — Telegram espera una respuesta
+rápida.
+
+**Consecuencia a tener presente:** `Application.initialize()` llama a
+`Bot.initialize()`, que llama a `get_me()` — un request real contra la API
+de Telegram para validar el token. Esto significa que el servidor, incluso
+en desarrollo local sin registrar el webhook contra Telegram todavía,
+necesita un `TELEGRAM_BOT_TOKEN` real (de BotFather) y conexión a internet
+para arrancar. No se evadió esto con una inicialización perezosa porque
+hacerlo hubiera sido apartarse del ciclo de vida documentado de la
+librería. La verificación de esta tarea corrió con `Bot._post` parcheado
+(sin tocar `main.py`) para no depender de un token real — ver detalle en
+el reporte de la tarea.
+
+**Seguridad del webhook — nueva decisión, no existía antes.**
+
+1. *Ruta no adivinable:* `/telegram/webhook/{TELEGRAM_BOT_TOKEN}` — el
+   token del propio bot forma parte de la ruta, patrón estándar de
+   despliegues de python-telegram-bot (evita rutas genéricas tipo
+   `/telegram/webhook` que cualquiera podría probar a ciegas).
+2. *Validación del secret token:* Telegram permite fijar un
+   `secret_token` al registrar el webhook (parámetro de `setWebhook`, no
+   invocado todavía por este servidor — ver nota abajo) y lo reenvía en el
+   header `X-Telegram-Bot-Api-Secret-Token` en cada request. El endpoint
+   compara ese header contra `TELEGRAM_WEBHOOK_SECRET` con
+   `secrets.compare_digest` (mismo patrón que `X-Device-Token` en D-013) y
+   responde `401` si falta o no coincide, **antes** de tocar el `Update` o
+   la cola de la librería. Las dos capas son independientes: adivinar la
+   ruta no alcanza sin el secreto, y viceversa.
+
+No se llama a `bot.set_webhook()` desde el código del servidor todavía:
+registrar el webhook contra Telegram de verdad requiere el VPS desplegado
+con dominio y TLS válido (Telegram exige HTTPS), que es tarea aparte. El
+comando manual para cuando eso exista queda documentado en
+`server/README.md`.
+
+**Escritura atómica de `current.bin`/`current.json` — nueva decisión.**
+`pipeline.guardar()` (D-018) escribe directo con `Path.write_bytes()` /
+`Path.write_text()`, sin swap atómico — correcto para
+`scripts/probar_pipeline.py` (proceso de un solo uso, sin concurrencia
+real) pero insuficiente para el webhook, que corre en el mismo proceso
+que ya sirve `/device/wake`: sin atomicidad, una lectura de `/device/wake`
+concurrente con una escritura del webhook podría leer un archivo a medio
+escribir, o un crash a mitad del guardado podría dejar `current.bin`
+corrupto. Por eso `server/app/main.py` no llama a `pipeline.guardar()`;
+implementa su propio `_guardar_atomico()`: escribe a un archivo temporal
+único (`tempfile.mkstemp(dir=DATA_DIR, ...)`, mismo directorio que el
+destino para garantizar mismo filesystem) y hace `os.replace()` al final
+— atómico en POSIX. `pipeline.py` no se tocó, según el alcance de esta
+tarea.
+
+**Manejo de contenido no soportado.** Tres `MessageHandler` registrados en
+orden: `filters.PHOTO`, `filters.TEXT & ~filters.COMMAND`, y un
+`filters.ALL` al final como catch-all. python-telegram-bot despacha al
+primer handler cuyo filtro matchea dentro de un grupo, así que cualquier
+mensaje que no sea foto ni texto plano (sticker, audio, documento,
+comando, etc.) cae en el catch-all, que responde un mensaje corto en vez
+de fallar en silencio o intentar procesarlo como texto.
+
+Implementado en `server/app/main.py` y `server/app/config.py` (lectura de
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`, mismo patrón de
+fail-fast que `DEVICE_AUTH_TOKEN`). No se tocó `pipeline.py` ni ningún
+archivo de `/firmware` o `/hardware`.

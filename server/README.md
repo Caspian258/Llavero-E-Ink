@@ -2,11 +2,10 @@
 
 Backend del llavero: expone el endpoint que el dispositivo consulta al
 despertar. Incluye el esqueleto (health check + `/device/wake` sirviendo
-estado desde archivo plano) y el pipeline de imagen (`app/pipeline.py`:
-foto o texto → `data/current.bin` + `data/current.json`). El webhook de
-Telegram que conecta el pipeline con mensajes reales todavía no está
-implementado — por ahora el pipeline se prueba con un script de línea de
-comandos, ver más abajo.
+estado desde archivo plano), el pipeline de imagen (`app/pipeline.py`:
+foto o texto → `data/current.bin` + `data/current.json`), y el webhook de
+Telegram (`app/main.py`) que conecta mensajes reales del bot con ese
+pipeline.
 
 ## Variables de entorno
 
@@ -14,6 +13,8 @@ comandos, ver más abajo.
 |---|---|---|
 | `DEVICE_AUTH_TOKEN` | Sí | Token que el dispositivo envía en el header `X-Device-Token`. Si no está seteada, el servidor falla al arrancar. |
 | `FW_VERSION` | No | Valor devuelto en el header `X-Fw-Version`. Default: `0.1.0`. |
+| `TELEGRAM_BOT_TOKEN` | Sí | Token del bot, de BotFather. Se usa para autenticar contra la API de Telegram y forma parte de la ruta del webhook (D-019). Si no está seteada, el servidor falla al arrancar. |
+| `TELEGRAM_WEBHOOK_SECRET` | Sí | Secreto que se registra como `secret_token` del webhook y que Telegram reenvía en el header `X-Telegram-Bot-Api-Secret-Token` en cada request. Si no está seteada, el servidor falla al arrancar. |
 
 ## Correr localmente
 
@@ -24,11 +25,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 export DEVICE_AUTH_TOKEN="un-token-de-prueba-cualquiera"
+export TELEGRAM_BOT_TOKEN="el-token-real-de-botfather"
+export TELEGRAM_WEBHOOK_SECRET="un-secreto-largo-y-aleatorio"
 uvicorn app.main:app --reload --port 8000
 ```
 
-Si `DEVICE_AUTH_TOKEN` no está seteada, el arranque falla con un
-`RuntimeError` explicando qué falta — no arranca con un token vacío.
+Si falta cualquiera de las tres, el arranque falla con un `RuntimeError`
+explicando qué falta — no arranca con un token vacío.
+
+**`TELEGRAM_BOT_TOKEN` tiene que ser un token real de BotFather incluso en
+desarrollo local**, aunque todavía no se registre el webhook contra
+Telegram: `python-telegram-bot` valida el token llamando a `getMe()` al
+arrancar (parte de su ciclo de vida estándar, D-019), y esa llamada sí
+sale a internet. Un token inventado hace que el arranque falle con
+`InvalidToken`.
 
 El servidor crea `server/data/` automáticamente si no existe (no se versiona,
 ver `.gitignore`).
@@ -143,3 +153,129 @@ El pipeline busca Noto Sans Regular en, en este orden:
 Si ninguna ruta existe, el pipeline falla con `FileNotFoundError` y lista
 las rutas que probó, en vez de fallar en silencio con una fuente
 default de baja calidad.
+
+## Webhook de Telegram
+
+### 1. Obtener el token del bot (BotFather)
+
+En Telegram, hablar con [@BotFather](https://t.me/BotFather):
+
+1. `/newbot` (o `/token` si el bot ya existe) y seguir las instrucciones.
+2. BotFather devuelve un token con forma `123456789:AA...` — ese es
+   `TELEGRAM_BOT_TOKEN`.
+
+### 2. Generar el secreto del webhook
+
+Cualquier string aleatorio de al menos 32 bytes sirve como
+`TELEGRAM_WEBHOOK_SECRET` (Telegram acepta hasta 256 caracteres,
+`A-Z`, `a-z`, `0-9`, `_` y `-`):
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### 3. Registrar el webhook contra el VPS (recién cuando esté desplegado)
+
+Esta tarea **no** hace este paso — requiere el VPS con dominio y TLS
+(Telegram exige HTTPS). Una vez desplegado, registrar con:
+
+```bash
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -d "url=https://tu-dominio.tld/telegram/webhook/$TELEGRAM_BOT_TOKEN" \
+  -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+Verificar el registro:
+
+```bash
+curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+```
+
+### 4. Probar el webhook en local con curl (sin Telegram real)
+
+Con el servidor corriendo (`TELEGRAM_BOT_TOKEN` y `TELEGRAM_WEBHOOK_SECRET`
+exportadas en la terminal de uvicorn), la ruta es
+`/telegram/webhook/$TELEGRAM_BOT_TOKEN` (D-019). Estos payloads son el
+formato real de `Update` que manda Telegram.
+
+**a. Sin el header de secret token → 401:**
+
+```bash
+curl -i -X POST "http://localhost:8000/telegram/webhook/$TELEGRAM_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "update_id": 100001,
+    "message": {
+      "message_id": 1,
+      "date": 1735689600,
+      "chat": {"id": 12345678, "type": "private", "first_name": "Prueba"},
+      "from": {"id": 12345678, "is_bot": false, "first_name": "Prueba"},
+      "text": "Buenos días, mi amor"
+    }
+  }'
+# 401
+```
+
+**b. Con el header, pero con un tipo de mensaje no soportado (sticker) →
+200 (ack a Telegram) y NO toca `current.bin`/`current.json`:**
+
+```bash
+curl -i -X POST "http://localhost:8000/telegram/webhook/$TELEGRAM_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Telegram-Bot-Api-Secret-Token: $TELEGRAM_WEBHOOK_SECRET" \
+  -d '{
+    "update_id": 100002,
+    "message": {
+      "message_id": 2,
+      "date": 1735689600,
+      "chat": {"id": 12345678, "type": "private", "first_name": "Prueba"},
+      "from": {"id": 12345678, "is_bot": false, "first_name": "Prueba"},
+      "sticker": {
+        "file_id": "AgADBAAD_fake",
+        "file_unique_id": "AQAD_fake",
+        "width": 512,
+        "height": 512,
+        "is_animated": false,
+        "is_video": false,
+        "type": "regular"
+      }
+    }
+  }'
+# 200 (Telegram recibe el ack). El bot responde en el chat que solo
+# procesa fotos o texto; current.bin/current.json quedan intactos.
+```
+
+**c. Con el header y un mensaje de texto real → procesa, actualiza
+`current.bin`/`current.json` (el procesamiento es asíncrono, revisar el
+checksum un segundo después):**
+
+```bash
+curl -i -X POST "http://localhost:8000/telegram/webhook/$TELEGRAM_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Telegram-Bot-Api-Secret-Token: $TELEGRAM_WEBHOOK_SECRET" \
+  -d '{
+    "update_id": 100003,
+    "message": {
+      "message_id": 3,
+      "date": 1735689600,
+      "chat": {"id": 12345678, "type": "private", "first_name": "Prueba"},
+      "from": {"id": 12345678, "is_bot": false, "first_name": "Prueba"},
+      "text": "Buenos días, mi amor"
+    }
+  }'
+# 200
+
+sleep 1
+cat data/current.json  # el checksum debe haber cambiado
+```
+
+Nota: correr el servidor de verdad con `uvicorn` para estas pruebas
+requiere un `TELEGRAM_BOT_TOKEN` real (ver arriba, por `getMe()`). Las
+respuestas que el bot manda de vuelta a Telegram (`reply_text`) sí
+requieren que el token sea válido y que Telegram pueda alcanzar al chat
+indicado — con un `chat.id` de prueba que no existe, el `POST` al webhook
+igual devuelve 200 (Telegram ya recibió el update) y `current.bin` se
+actualiza igual, pero el intento de responder en el chat falla en el log
+del servidor sin tumbarlo.
+
+`data/` no se versiona (ver `.gitignore`).
