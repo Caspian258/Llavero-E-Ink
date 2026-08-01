@@ -16,12 +16,13 @@
 
 #if MODO_PRUEBA == 2 || MODO_PRUEBA == 3
 
-// Pinout validado en docs/decisiones.md D-001. Declarados solo en modo 2/3:
-// en modo 1 no se toca ni se menciona ninguno de estos pines.
+// Pinout validado en docs/decisiones.md D-001, con DC reubicado según D-017.
+// Declarados solo en modo 2/3: en modo 1 no se toca ni se menciona ninguno
+// de estos pines.
 #define PIN_DIN  7
 #define PIN_CLK  6
 #define PIN_CS   10
-#define PIN_DC   20
+#define PIN_DC   3
 #define PIN_RST  5
 #define PIN_BUSY 4
 

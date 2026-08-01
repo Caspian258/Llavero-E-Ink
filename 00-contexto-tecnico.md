@@ -23,12 +23,14 @@
 | DIN | D5 | GPIO7 | SPI por hardware, ruteado vía matriz de pines (no es el pin FSPI nativo; ese es GPIO10, ocupado por CS) |
 | CLK | D4 | GPIO6 | SPI por hardware, ruteado vía matriz de pines (el nativo, GPIO8, es strapping pin — se evita) |
 | CS | D10 | GPIO10 | |
-| DC | D7 | GPIO20 | |
+| DC | D1 | GPIO3 | Lado izquierdo del conector, junto a RST y BUSY (ver D-017) |
 | RST | D3 | GPIO5 | RTC GPIO — se mantiene en LOW durante deep sleep |
 | BUSY | D2 | GPIO4 | RTC GPIO, entrada |
 
 Pinout corregido el 2026-07-28 tras validar el mapeo D→GPIO real del XIAO
 ESP32C3 contra la documentación de Seeed; ver docs/decisiones.md D-001.
+DC reubicado de D7/GPIO20 a D1/GPIO3 el 2026-08-01 para balancear el
+conector en 3 pines por lado; ver docs/decisiones.md D-017.
 
 ## Decisiones ya tomadas
 

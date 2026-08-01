@@ -151,3 +151,29 @@ verificando los headers `X-Sleep-Seconds`/`X-Fw-Version`/`X-Image-Checksum`
 y los 5000 bytes del body) pasaron corriendo bajo ese venv de 3.12.
 El venv y los archivos de prueba (`data/current.bin`, `data/current.json`)
 se borraron después de verificar; no quedan versionados.
+
+## D-017 — DC reubicado a D1/GPIO3 para balancear el conector (2026-08-01)
+Modifica el pinout base de D-001: se mueve **solo** DC, de D7/GPIO20 a
+D1/GPIO3. DIN (D5/GPIO7), CLK (D4/GPIO6), CS (D10/GPIO10), RST (D3/GPIO5)
+y BUSY (D2/GPIO4) quedan exactamente igual.
+
+Motivo: balancear el conector físico en 3 pines por lado — DIN/CLK/CS del
+lado derecho, RST/BUSY/DC del lado izquierdo — para facilitar el cableado
+a mano. DC no es parte del periférico SPI nativo (a diferencia de
+DIN/CLK/CS, que si lo son y por eso no se tocan), así que reubicarlo no
+tiene costo de rendimiento ni pierde ruteo por hardware.
+
+GPIO3 no es strapping pin (los que se evitan en el C3 son GPIO2/8/9,
+según D-001) ni forma parte de UART0 (GPIO20/21, también evitado en
+D-001) — confirmado contra la documentación de Espressif/Seeed antes de
+fijarlo.
+
+Nota sobre D-001: ese pinout original dejaba D1/GPIO3 libre y "reservado
+para gate de MOSFET". Esa reserva ya no aplica: D-006 decidió no
+implementar el MOSFET de canal P (la hibernación por software del panel
+resultó suficiente), así que GPIO3 quedó libre de facto antes de esta
+decisión. D-001 no se edita; esta nota documenta por qué D-017 no
+contradice esa entrada.
+
+DC no participaba en los holds de deep sleep de D-002 (solo RST y BUSY
+los tenían) y sigue sin participar — sin cambio de estrategia ahí.
