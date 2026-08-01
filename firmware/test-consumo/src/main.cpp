@@ -29,7 +29,7 @@
 
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(PIN_CS, PIN_DC, PIN_RST, PIN_BUSY));
 
-void inicializarYDibujarPatron() {
+void inicializarYDibujarPatron(int modo) {
   SPI.begin(PIN_CLK, -1, PIN_DIN, PIN_CS); // SPI por hardware con pines custom (no son los nativos del C3)
   display.init(115200);
   display.setRotation(0);
@@ -38,6 +38,11 @@ void inicializarYDibujarPatron() {
   do {
     display.fillScreen(GxEPD_WHITE);
     display.drawRect(20, 20, 160, 160, GxEPD_BLACK);
+    display.setTextColor(GxEPD_BLACK);
+    display.setTextSize(3);
+    display.setCursor(70, 100);
+    display.print("MODO ");
+    display.print(modo);
   } while (display.nextPage());
 }
 #endif
@@ -84,13 +89,13 @@ void setup() {
 
 #elif MODO_PRUEBA == 2
   Serial.println("MODO 2: inicializando pantalla...");
-  inicializarYDibujarPatron();
+  inicializarYDibujarPatron(2);
   display.hibernate(); // apaga el panel y pone su controlador en bajo consumo (hibernación por software)
   entrarDeepSleep(2);
 
 #elif MODO_PRUEBA == 3
   Serial.println("MODO 3: inicializando pantalla...");
-  inicializarYDibujarPatron();
+  inicializarYDibujarPatron(3);
   display.hibernate(); // apaga el panel y pone su controlador en bajo consumo
 
   const int pinesPantalla[] = { PIN_DIN, PIN_CLK, PIN_CS, PIN_DC, PIN_RST, PIN_BUSY };
