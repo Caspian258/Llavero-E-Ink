@@ -177,3 +177,52 @@ contradice esa entrada.
 
 DC no participaba en los holds de deep sleep de D-002 (solo RST y BUSY
 los tenían) y sigue sin participar — sin cambio de estrategia ahí.
+
+## D-018 — Pipeline de imagen: texto adaptativo y convención de bit 1bpp (2026-08-01)
+
+**Modo texto — tamaño adaptativo + Noto Sans.** Lienzo 200×200 blanco,
+texto negro, margen de 10px por lado (área útil 180×180). Empieza en
+fuente 32px, envuelve por palabra al ancho disponible, y si el bloque no
+cabe en alto reduce de 2 en 2px hasta un mínimo de 12px. Si ni al mínimo
+cabe, trunca el texto carácter por carácter agregando "..." hasta que
+quepa, en vez de fallar o cortar a la mitad. Centrado horizontal y
+vertical del bloque completo. Fuente: Noto Sans Regular, con lista de
+rutas candidatas y variable de entorno `NOTO_SANS_PATH` de override,
+porque la ruta real difiere entre el entorno de desarrollo (Fedora, sin
+`fonts-noto-core`) y el VPS de producción (Ubuntu 24.04, con
+`fonts-noto-core`) — ver `server/README.md` para el comando de
+instalación exacto. Implementado en `server/app/pipeline.py`.
+
+**Convención de bit del empaquetado 1bpp — verificada, no asumida.**
+Se inspeccionó el código fuente de GxEPD2 tal como está vendorizado en
+`firmware/test-consumo/.pio/libdeps/seeed_xiao_esp32c3/GxEPD2/src/`:
+
+- `GxEPD2_BW.h::drawPixel()`: con `color != 0` (GxEPD_WHITE) fija el bit a
+  1; con `color == 0` (GxEPD_BLACK) lo deja en 0. La posición del bit es
+  `1 << (7 - x % 8)` — MSB-first, el primer píxel de cada grupo de 8 cae
+  en el bit más significativo.
+- `GxEPD2_BW.h::fillScreen()`: blanco llena el byte con `0xFF`, negro con
+  `0x00`. Mismo criterio a nivel de byte completo.
+- `epd/GxEPD2_154_D67.cpp::_writeImage()`: transfiere el buffer recibido
+  al controlador tal cual, sin invertir (salvo que se pida `invert=true`
+  explícitamente, que el firmware de este proyecto no usa). El buffer que
+  arma el servidor debe seguir entonces la misma convención que el
+  framebuffer interno de GxEPD2, no la inversa.
+
+Convención fijada para el buffer de 5000 bytes que produce el servidor:
+**1 = blanco, 0 = negro, MSB-first, row-major.** Se verificó además que
+`PIL.Image.convert("1", ...).tobytes()` empaqueta con exactamente esta
+convención (pixel 255/blanco → bit 1, pixel 0/negro → bit 0, MSB-first),
+así que el pipeline no arma los bytes a mano — usa el empaquetado nativo
+de Pillow. Esto es crítico: si el firmware alguna vez cambia de método
+para pintar el buffer (ej. deja de usar `writeImage`/`drawImage` directo y
+pasa por otra ruta de GxEPD2), hay que re-verificar esta convención contra
+el nuevo método antes de asumir que sigue aplicando — de lo contrario la
+imagen sale invertida o corrida.
+
+Implementado en `server/app/pipeline.py`, probado con
+`server/scripts/probar_pipeline.py` (foto no cuadrada con center-crop,
+texto corto, texto largo multi-oración, y un texto deliberadamente
+gigante para forzar el camino de truncado). No se agregó ninguna
+dependencia nueva a `requirements.txt`: Pillow 12.3.0, ya fijada en
+D-016, cubre dithering, redimensionado y renderizado de texto TrueType.

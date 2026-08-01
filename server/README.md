@@ -1,9 +1,12 @@
 # Servidor — Llavero E-Ink
 
 Backend del llavero: expone el endpoint que el dispositivo consulta al
-despertar. Por ahora solo incluye el esqueleto (health check + `/device/wake`
-sirviendo estado desde archivo plano). El webhook de Telegram y el pipeline
-de imagen (dithering, texto) son tareas separadas, todavía no implementadas.
+despertar. Incluye el esqueleto (health check + `/device/wake` sirviendo
+estado desde archivo plano) y el pipeline de imagen (`app/pipeline.py`:
+foto o texto → `data/current.bin` + `data/current.json`). El webhook de
+Telegram que conecta el pipeline con mensajes reales todavía no está
+implementado — por ahora el pipeline se prueba con un script de línea de
+comandos, ver más abajo.
 
 ## Variables de entorno
 
@@ -80,3 +83,63 @@ curl -i http://localhost:8000/device/wake \
 # X-Image-Checksum: deadbeef, y /tmp/current.bin con 5000 bytes.
 wc -c /tmp/current.bin
 ```
+
+## Pipeline de imagen (foto o texto → buffer para el dispositivo)
+
+`app/pipeline.py` convierte una foto o un texto en el par de archivos que
+`/device/wake` sirve: `data/current.bin` (5000 bytes, 1bpp, ver convención
+de bit en D-018) y `data/current.json` (checksum + metadata, D-009). Se
+prueba de forma standalone con `scripts/probar_pipeline.py`, sin depender
+de Telegram.
+
+Como `pipeline.py` importa las rutas desde `app/config.py`, el script
+necesita la misma variable de entorno que el servidor:
+
+```bash
+cd server
+source .venv/bin/activate  # venv de "Correr localmente" arriba
+export DEVICE_AUTH_TOKEN="un-token-de-prueba-cualquiera"
+
+# Modo foto: recorta al centro (sin deformar), escala a 200x200,
+# escala de grises, dithering Floyd-Steinberg.
+python scripts/probar_pipeline.py --imagen ruta/a/foto.jpg
+
+# Modo texto: tamaño de fuente adaptativo (32px a 12px), word wrap,
+# centrado, trunca con "..." si ni el tamaño mínimo alcanza.
+python scripts/probar_pipeline.py --texto "Buenos días, mi amor"
+```
+
+Ambos casos imprimen el checksum CRC32 calculado y dejan
+`data/current.bin` / `data/current.json` listos — los mismos que ya lee
+`/device/wake`. `data/` no se versiona (ver `.gitignore`).
+
+### Fuente Noto Sans (modo texto)
+
+El pipeline busca Noto Sans Regular en, en este orden:
+
+1. La ruta en la variable de entorno `NOTO_SANS_PATH`, si está definida.
+2. `/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf` — la ruta que
+   publica el paquete apt `fonts-noto-core` en Ubuntu 24.04 (el VPS de
+   producción, D-007). Instalar con:
+
+   ```bash
+   sudo apt install fonts-noto-core
+   ```
+
+   Después de instalar, conviene confirmar la ruta real en el VPS (los
+   nombres de archivo pueden variar entre versiones del paquete):
+
+   ```bash
+   dpkg -L fonts-noto-core | grep 'NotoSans-Regular'
+   ```
+
+3. `/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf` — donde vive Noto
+   Sans en el entorno de desarrollo usado para esta tarea (Fedora, paquete
+   `google-noto-sans-vf-fonts`). Es una fuente variable; Pillow la abre
+   directo y resuelve a la instancia "Regular" por default. `apt install
+   fonts-noto-core` no existe en Fedora — esta ruta es solo para
+   desarrollo local, no aplica al VPS.
+
+Si ninguna ruta existe, el pipeline falla con `FileNotFoundError` y lista
+las rutas que probó, en vez de fallar en silencio con una fuente
+default de baja calidad.
