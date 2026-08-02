@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-from app import pipeline
+from app import horario, pipeline
 from app.config import (
     CURRENT_BIN_PATH,
     CURRENT_JSON_PATH,
@@ -29,10 +29,6 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Placeholder de sueño hasta que exista el cálculo real con Europe/Copenhagen
-# (D-005, tarea aparte). Mismo valor que el default de pipeline.guardar().
-SLEEP_SECONDS_PLACEHOLDER = 86400
-
 MENSAJE_CONFIRMACION = "Listo, se actualizará en el próximo despertar del llavero."
 MENSAJE_ERROR = "Hubo un error al procesar eso. Intenta de nuevo."
 MENSAJE_NO_SOPORTADO = "Solo puedo procesar fotos o mensajes de texto."
@@ -43,7 +39,7 @@ MENSAJE_NO_SOPORTADO = "Solo puedo procesar fotos o mensajes de texto."
 WEBHOOK_PATH = f"/telegram/webhook/{TELEGRAM_BOT_TOKEN}"
 
 
-def _guardar_atomico(resultado: pipeline.ResultadoPipeline, sleep_seconds: int) -> None:
+def _guardar_atomico(resultado: pipeline.ResultadoPipeline) -> None:
     """Escribe current.bin/current.json de forma atómica (D-019): primero a un
     archivo temporal en el mismo directorio, después swap con os.replace().
     Así /device/wake nunca puede leer un archivo a medio escribir, y si el
@@ -53,11 +49,15 @@ def _guardar_atomico(resultado: pipeline.ResultadoPipeline, sleep_seconds: int) 
     ese comportamiento alcanza para el script de prueba de línea de comandos
     (sin concurrencia real) pero no para el webhook, que corre en el mismo
     proceso que ya sirve /device/wake.
+
+    No guarda sleep_seconds acá (D-026): dejó de ser metadata de la imagen,
+    igual que X-Fw-Version no lo es (D-015) — se calcula en tiempo real al
+    responder /device/wake, no en el momento en que se guarda una imagen
+    nueva (que puede ser horas antes de que el dispositivo la pida).
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     metadata = {
         "checksum": resultado.checksum,
-        "sleep_seconds": sleep_seconds,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
 
@@ -92,7 +92,7 @@ async def _procesar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     finally:
         ruta_tmp.unlink(missing_ok=True)
 
-    _guardar_atomico(resultado, SLEEP_SECONDS_PLACEHOLDER)
+    _guardar_atomico(resultado)
     await message.reply_text(MENSAJE_CONFIRMACION)
 
 
@@ -108,7 +108,7 @@ async def _procesar_texto(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await message.reply_text(MENSAJE_ERROR)
         return
 
-    _guardar_atomico(resultado, SLEEP_SECONDS_PLACEHOLDER)
+    _guardar_atomico(resultado)
     await message.reply_text(MENSAJE_CONFIRMACION)
 
 
@@ -166,11 +166,18 @@ def device_wake(x_device_token: str | None = Header(default=None)):
     metadata = json.loads(CURRENT_JSON_PATH.read_text())
     buffer = CURRENT_BIN_PATH.read_bytes()
 
+    # Calculado fresco en cada request (D-026), no leído de metadata: la
+    # imagen puede haberse guardado horas antes de que el dispositivo
+    # despierte y pregunte, así que "cuánto falta para las 6 AM" solo tiene
+    # sentido calculado en este momento, no en el momento en que se guardó
+    # la imagen.
+    sleep_seconds = horario.segundos_hasta_proximo_amanecer()
+
     return Response(
         content=buffer,
         media_type="application/octet-stream",
         headers={
-            "X-Sleep-Seconds": str(metadata["sleep_seconds"]),
+            "X-Sleep-Seconds": str(sleep_seconds),
             "X-Fw-Version": FW_VERSION,
             "X-Image-Checksum": str(metadata["checksum"]),
         },

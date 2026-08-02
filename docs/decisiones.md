@@ -689,3 +689,114 @@ mantenga el consumo bajo con el flujo completo de red) no se puede
 probar sin hardware real: XIAO ESP32C3 + panel Waveshare 1.54" reales,
 conectados a internet real, contra el servidor real — ver
 `firmware/llavero/README.md` para el flujo de prueba manual.
+
+## D-025 — Ciclo completo validado end-to-end con hardware real (2026-08-02)
+
+`firmware/llavero/` se probó de punta a punta con hardware real, no solo
+compilado: Wi-Fi (D-010/D-011/D-020), cliente HTTPS con TLS real contra
+`caspiandomain.dev` (D-008/D-023), descarga condicionada por checksum
+(D-009/D-023), y pintado real en el panel e-ink (D-021/D-024).
+
+Confirmado con dos fotos reales mandadas por Telegram, ambas reflejadas
+correctamente en la pantalla física tras un reset manual del dispositivo
+entre una y otra. Es la primera verificación real de todo el camino junto
+(webhook → pipeline → servidor → dispositivo → panel), no solo de cada
+tramo por separado como en las tareas anteriores.
+
+**Pendiente, ya conocido:** `sleep_seconds` sigue en el placeholder fijo
+de 86400 s (D-009); el cálculo real con la zona horaria de Copenhague
+(D-005) todavía no está implementado en el servidor. El dispositivo ya
+duerme el valor que el servidor le indique (D-023), así que cuando D-005
+se implemente no hace falta tocar el firmware — solo el servidor.
+
+## D-026 — Cálculo real de sleep_seconds: próximas 6 AM hora de Copenhague (2026-08-02)
+
+Reemplaza el placeholder fijo de 86400 s (D-009/D-025) por un cálculo
+real en `server/app/horario.py`: cuántos segundos faltan desde ahora hasta
+las próximas 6:00 AM hora de Copenhague.
+
+**Por qué 6 AM — razonamiento que ya estaba dado, no es nuevo.**
+`00-contexto-tecnico.md` ya identificaba dos riesgos relacionados desde
+Fase 0: que el hotspot del celular puede estar apagado a la hora de
+despertar (mitigado con el backoff exponencial de D-010, que reintenta
+hasta conectar) y que "conviene que despierte de madrugada hora danesa
+para que ella encuentre la imagen nueva al levantarse". 6 AM es
+suficientemente temprano para que, aun si el primer intento falla y el
+backoff necesita un par de reintentos, la imagen esté lista antes de que
+la destinataria revise el llavero al levantarse — y suficientemente tarde
+como para no intentar conectar en la madrugada más profunda, cuando la
+probabilidad de que el hotspot esté encendido es más baja.
+
+**`zoneinfo`, no un offset fijo — confirmado sin dependencias nuevas.**
+Python 3.12 trae `zoneinfo` en la librería estándar; se probó localmente
+que `ZoneInfo("Europe/Copenhagen")` funciona sin instalar el paquete `tzdata`
+de PyPI, usando la base de datos de zonas horarias del sistema operativo
+(`/usr/share/zoneinfo/Europe/Copenhagen`). Ubuntu 24.04 (el VPS de
+producción, D-007/D-022) trae el paquete `tzdata` del sistema como parte
+base de la instalación, así que no hace falta agregar nada a
+`requirements.txt`. No se usa un offset fijo ("sumar 2 horas") — D-005 ya
+advertía que eso se desincroniza en el cambio de horario; `zoneinfo`
+resuelve CEST/CET solo, por fecha.
+
+**Un bug real encontrado escribiendo el caso de prueba de cambio de
+horario — no algo hipotético.** La primera versión de la función restaba
+directo dos `datetime` timezone-aware (`objetivo - ahora`), asumiendo que
+Python siempre normaliza a UTC antes de restar cuando ambos son aware.
+Eso es **falso** para este caso puntual: la documentación de `datetime`
+dice que si ambos operandos comparten el mismo objeto `tzinfo` (acá,
+siempre la misma instancia de `ZoneInfo("Europe/Copenhagen")`, reutilizada
+para "ahora" y para "objetivo"), Python resta las partes "naive" del
+reloj e ignora el `tzinfo` por completo — correcto para un huso horario de
+offset fijo, pero **incorrecto** para `zoneinfo` cuando los dos datetimes
+caen a distintos lados de un cambio de horario. El primer intento pasaba
+los 7 casos "normales" del script de verificación, pero fallaba los 2
+casos que cruzan un cambio de horario real (dando 7h en vez de 8h en el
+cruce de otoño, y 7h en vez de 6h en el de primavera) — exactamente el
+error que un offset fijo también cometería, aunque la causa acá era otra.
+Se corrigió forzando `.astimezone(timezone.utc)` en ambos operandos antes
+de restar. Sin el caso de prueba explícito de cambio de horario que pedía
+la tarea, este bug habría llegado a producción y se habría notado recién
+el 25-oct-2026 o el 29-mar-2026 (las fechas de transición 2026 confirmadas
+contra `zoneinfo`, no asumidas — coinciden con la fecha de octubre que ya
+mencionaba D-005).
+
+**Piso mínimo de 300 s.** Si el cálculo da menos de eso (ej. corriendo a
+segundos exactos de las 6 AM), se devuelve 300 en su lugar — evita mandarle
+al dispositivo un sleep casi nulo que lo haría despertar en loop.
+
+**Dónde vive el cálculo — decisión de arquitectura, no solo "mover código".**
+`server/app/horario.py` es un módulo nuevo (no se tocó `pipeline.py`) con
+una única función, `segundos_hasta_proximo_amanecer(ahora_utc=None)` —
+`ahora_utc` es inyectable para poder simular horarios exactos en pruebas.
+Se llama desde `device_wake()` en `server/app/main.py`, **calculado fresco
+en cada request**, no guardado como metadata de la imagen: guardar
+`sleep_seconds` en `current.json` en el momento de procesar un mensaje de
+Telegram (como hacía antes `_guardar_atomico()`) queda mal, porque el
+dispositivo puede pedir `/device/wake` horas después de que se subió la
+imagen — "cuánto falta para las 6 AM" solo tiene sentido calculado en el
+momento en que el dispositivo pregunta, no en el momento en que se guardó
+la imagen. Mismo criterio que D-015 ya aplicó para `X-Fw-Version`: no es
+metadata por imagen. `_guardar_atomico()` y sus dos llamadores en
+`server/app/main.py` ya no reciben ni guardan `sleep_seconds`.
+`pipeline.guardar()` y `server/scripts/probar_pipeline.py` no se tocaron
+(no estaban en el alcance de esta tarea y modificar la firma de
+`pipeline.guardar()` los habría roto) — siguen aceptando y escribiendo un
+`sleep_seconds` en `current.json` que ahora es inerte, porque
+`device_wake()` ya no lo lee. Es una inconsistencia menor conocida, no un
+bug: el script de prueba de línea de comandos sigue funcionando exactamente
+igual que antes, y el valor que escribe no afecta la respuesta real del
+endpoint.
+
+Verificación: `server/scripts/verificar_horario.py` corre 9 casos con
+horarios simulados (sin depender del reloj real) — antes/después de las 6
+AM el mismo día, el piso mínimo, verano (CEST) e invierno (CET) por
+separado, y los dos cruces de cambio de horario reales de 2026 — los 9
+pasan. Además, se corrió el servidor real localmente (`uvicorn`, con
+`Bot._post` parcheado para no depender de un token real de Telegram) y se
+confirmó con `curl` contra `/device/wake` real que `X-Sleep-Seconds` ya no
+es 86400 fijo: en tres llamadas sucesivas separadas por segundos reales,
+devolvió 31522, luego 31508, luego 31484 — bajando en tiempo real,
+prueba de que se calcula en cada request y no se cachea. También se
+confirmó que `current.json` sin la clave `sleep_seconds` (formato nuevo)
+no rompe el endpoint. No hay un test automatizado (`pytest`) preexistente
+en `server/` que este cambio pudiera romper.
