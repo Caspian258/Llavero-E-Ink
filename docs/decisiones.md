@@ -800,3 +800,142 @@ prueba de que se calcula en cada request y no se cachea. También se
 confirmó que `current.json` sin la clave `sleep_seconds` (formato nuevo)
 no rompe el endpoint. No hay un test automatizado (`pytest`) preexistente
 en `server/` que este cambio pudiera romper.
+
+## D-027 — OTA: particiones, endpoint /device/firmware, y rollback nativo (2026-08-02)
+
+Agrega actualización OTA a `firmware/llavero/`, según D-012: `HTTPUpdate`
+sobre el mismo `WiFiClientSecure` con `CERT_RAIZ` (D-023), rollback
+automático de ESP-IDF, y un endpoint nuevo `GET /device/firmware` en el
+servidor. No se tocó la lógica de Wi-Fi ni de imagen ya existentes.
+
+**D-012 asumía que hacía falta una tabla de particiones custom — verificado
+ahora, es falso.** El esquema `default.csv` que PlatformIO ya usa para
+`seeed_xiao_esp32c3` (confirmado por la flag de build
+`-DARDUINO_PARTITION_default` y localizando el archivo real en
+`framework-arduinoespressif32/tools/partitions/default.csv`) **ya tiene
+particiones OTA duales**:
+
+```
+nvs,      data, nvs,     0x9000,  0x5000
+otadata,  data, ota,     0xe000,  0x2000
+app0,     app,  ota_0,   0x10000, 0x140000   (1,310,720 bytes)
+app1,     app,  ota_1,   0x150000,0x140000   (1,310,720 bytes)
+spiffs,   data, spiffs,  0x290000,0x160000   (sin usar)
+coredump, data, coredump,0x3F0000,0x10000
+```
+
+El "Flash: X% usado de 1310720 bytes" que reportaba `pio run` desde D-020
+**ya era el tamaño de un slot OTA** (`app0`), no el flash completo de
+4MB — la comparación contra un slot OTA venía sucediendo desde el
+principio sin que nadie lo hubiera notado como tal. El firmware antes de
+esta tarea (D-024) usaba 958,838 bytes (73.2% del slot); con OTA agregado
+(`HTTPUpdate`), 974,108 bytes (74.3%) — **+15,270 bytes**, casi nada,
+porque reutiliza el `WiFiClientSecure`/`HTTPClient`/mbedTLS que ya estaba
+linkeado. Margen restante por slot: ~336 KB (25.7%). No se tocó
+`platformio.ini` para particiones — no hacía falta.
+
+**Rollback nativo confirmado, no reimplementado.** Dos verificaciones
+contra el SDK real, no contra documentación general de ESP-IDF:
+
+- `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` y `CONFIG_APP_ROLLBACK_ENABLE=y`
+  ya están en el `sdkconfig` prearmado que trae `framework-arduinoespressif32`
+  para ESP32-C3 (los cuatro modos de flash: dio/dout/qio/qout) — el
+  rollback automático del bootloader está activo por default, no hace
+  falta un `sdkconfig` custom.
+- `Updater.cpp` (la librería `Update.h`, usada por `HTTPUpdate`) llama a
+  `esp_ota_set_boot_partition()` al terminar de escribir, pero **nunca**
+  a `esp_ota_mark_app_valid_cancel_rollback()` — confirma que la partición
+  nueva queda en estado "pendiente de verificar" hasta que la aplicación
+  la confirme explícitamente, exactamente el comportamiento que D-012
+  pedía aprovechar sin reimplementar.
+
+`esp_ota_mark_app_valid_cancel_rollback()` se llama en
+`marcarFirmwareValido()`, **siempre** que `consultarServidor()` tiene
+éxito (no solo la primera vez después de un OTA) — es idempotente
+(`esp_ota_ops.h`: devuelve `ESP_OK`, no falla si la partición ya estaba
+válida), así que no hace falta distinguir "¿es la primera vez que corre
+este binario?" en el código. Si el firmware nuevo crashea o se reinicia
+antes de llegar a ese punto, el bootloader revierte solo al anterior en
+el siguiente arranque.
+
+**`HTTPUpdate` — APIs verificadas contra el código fuente instalado:**
+
+- `httpUpdate.update(WiFiClient&, url, currentVersion, requestCB)` — el
+  overload que reutiliza un `WiFiClientSecure` ya configurado con
+  `CERT_RAIZ`, en vez de que `HTTPUpdate` arme su propio cliente TLS
+  (evita duplicar la cadena de confianza, tal como pedía la tarea).
+- `requestCB` (`std::function<void(HTTPClient*)>`) es el mecanismo para
+  agregar el header `X-Device-Token` a la request de descarga — `update()`
+  no tiene un parámetro directo de headers custom, pero sí este callback,
+  invocado antes de mandar la request, donde se llama
+  `http->addHeader(...)`.
+- `rebootOnUpdate(false)`: no hace falta un reinicio inmediato tras
+  escribir el OTA. `esp_ota_set_boot_partition()` ya deja marcada la
+  partición nueva como la próxima a arrancar, y el deep sleep en ESP32 es
+  un reset completo del chip (no un "pausar/resumir" que preserve qué
+  imagen ya está cargada) — el bootloader vuelve a leer `otadata` en el
+  siguiente despertar por temporizador igual que en cualquier arranque.
+  El firmware nuevo arranca solo, sin código adicional para forzarlo.
+
+**Endpoint `GET /device/firmware` (servidor).** Mismo `X-Device-Token`
+que `/device/wake` (D-013). Sirve el binario más reciente en
+`server/data/firmware/`, subido a mano (sin CI/CD, fuera de alcance) con
+el nombre `llavero-<version>.bin`. La versión más alta se elige
+comparando **numéricamente por segmento** (`(0,10,0) > (0,9,0)`), no como
+texto — una comparación de strings leería `"0.10.0" < "0.9.0"` por orden
+de caracteres, exactamente el tipo de bug que ya apareció en D-026 por no
+verificar el comportamiento real de una comparación antes de asumirla.
+Archivos que no matchean el patrón de nombre se ignoran en silencio (no
+rompen el endpoint). Sin ningún archivo subido: `404`. Probado con `curl`
+contra el servidor real corriendo localmente (mismo método que D-026:
+`Bot._post` parcheado para no depender de un token real de Telegram):
+401 sin token, 404 sin archivos, y con tres binarios de prueba
+(`llavero-0.9.0.bin`, `llavero-0.10.0.bin`, `llavero-0.2.0.bin`, más un
+`notas.txt` que no matchea el patrón) devolvió `X-Fw-Version: 0.10.0` con
+el contenido correcto — confirma la comparación numérica en la práctica,
+no solo leyendo el código.
+
+**Dos `X-Fw-Version` con significados distintos — intencional, no un
+descuido.** `X-Fw-Version` de `/device/wake` (D-015) es la versión mínima
+de protocolo que el servidor anuncia como compatible — un valor fijo del
+servidor (`config.FW_VERSION`, variable de entorno), independiente de qué
+binario OTA haya disponible. `X-Fw-Version` de `/device/firmware` (nuevo,
+esta tarea) describe el binario que se está sirviendo — se deriva del
+nombre del archivo subido, no tiene relación con `config.FW_VERSION`. El
+dispositivo ya leía y logueaba el primero desde D-023 (variable local
+`versionFw` dentro de `consultarServidor()`, sin comparar contra nada);
+**no existía ningún concepto de "versión propia del firmware" en
+`firmware/llavero/` antes de esta tarea** — se agregó la constante
+`FW_VERSION` (`main.cpp`, compilada, `"0.1.0"`) específicamente para
+poder compararse contra el `X-Fw-Version` de `/device/firmware`. Subir
+esta constante a mano en cada release, junto con el nombre del `.bin`
+que se sube al servidor (ver `server/README.md`).
+
+**Chequeo de OTA independiente del de imagen.** `verificarActualizacionFirmware()`
+se llama después de que `consultarServidor()` devuelve éxito (Wi-Fi +
+`/device/wake` respondieron bien), pero es una consulta HTTPS aparte con
+su propio manejo de errores — un fallo ahí (servidor sin firmware subido,
+timeout, TLS) solo se loggea y nunca impide que el dispositivo llegue a
+`dormir()`. El caso inverso (imagen falla, firmware sí disponible) no
+aplica directo porque el chequeo de OTA está condicionado a que
+`/device/wake` haya respondido 200 — pero un tamaño de imagen incorrecto
+(D-023: buffer que no mide 5000 bytes) no hace que `consultarServidor()`
+devuelva `false`, así que el chequeo de OTA igual se ejecuta en ese caso.
+
+**Riesgo conocido, no resuelto — a propósito, no oculto.** Este proyecto
+no mide batería (D-006). Un corte de energía real a mitad de la escritura
+de la partición OTA (`Update.write()`) podría dejarla a medio escribir.
+El rollback de ESP-IDF protege contra un firmware que **terminó** de
+escribirse pero falla al arrancar o al completar un ciclo — no contra un
+corte de energía literal a mitad del propio proceso de escritura. Queda
+documentado en el código (`verificarActualizacionFirmware()`) y acá,
+aceptado como riesgo del proyecto — resolverlo (ej. verificar un segundo
+banco de energía, o un checksum adicional antes de aplicar) queda fuera
+del alcance de esta tarea.
+
+Verificación: `pio run` compila limpio (0 errores, 0 warnings) en una
+recompilación completa desde cero. Servidor probado con `curl` real
+(401/404/200 con selección de versión correcta, ver arriba). El ciclo de
+OTA completo (descarga real, rollback real ante un firmware roto,
+arranque real con el firmware nuevo) no se puede probar sin hardware
+real — ver `firmware/llavero/README.md` para el flujo de prueba manual.

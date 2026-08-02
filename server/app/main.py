@@ -4,6 +4,7 @@ dispositivo, y webhook de Telegram que alimenta el pipeline de imagen."""
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 from contextlib import asynccontextmanager
@@ -28,6 +29,13 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Directorio de subida manual de binarios OTA (D-012/D-027). El usuario los
+# coloca acá a mano (ej. por scp) con el nombre exacto "llavero-<version>.bin"
+# — no hay pipeline de CI/CD, está fuera de alcance. Ver server/README.md.
+FIRMWARE_DIR = DATA_DIR / "firmware"
+FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
+PATRON_ARCHIVO_FIRMWARE = re.compile(r"^llavero-(\d+(?:\.\d+)*)\.bin$")
 
 MENSAJE_CONFIRMACION = "Listo, se actualizará en el próximo despertar del llavero."
 MENSAJE_ERROR = "Hubo un error al procesar eso. Intenta de nuevo."
@@ -70,6 +78,34 @@ def _guardar_atomico(resultado: pipeline.ResultadoPipeline) -> None:
     with os.fdopen(fd_json, "w", encoding="utf-8") as f:
         f.write(json.dumps(metadata, ensure_ascii=False, indent=2))
     os.replace(tmp_json_str, CURRENT_JSON_PATH)
+
+
+def _version_a_tupla(texto: str) -> tuple[int, ...]:
+    return tuple(int(parte) for parte in texto.split("."))
+
+
+def _firmware_mas_reciente() -> tuple[Path, str] | None:
+    """Busca en FIRMWARE_DIR el archivo llavero-<version>.bin con la versión
+    más alta (D-027). Comparación numérica por segmento, no alfabética —
+    "llavero-0.10.0.bin" no debe leerse como anterior a
+    "llavero-0.9.0.bin" por orden de caracteres. None si no hay ninguno
+    subido todavía, o si ninguno matchea el patrón de nombre esperado.
+    """
+    mejor: tuple[Path, str, tuple[int, ...]] | None = None
+    for ruta in FIRMWARE_DIR.iterdir():
+        coincidencia = PATRON_ARCHIVO_FIRMWARE.match(ruta.name)
+        if not coincidencia:
+            continue
+        version_texto = coincidencia.group(1)
+        try:
+            version_tupla = _version_a_tupla(version_texto)
+        except ValueError:
+            continue
+        if mejor is None or version_tupla > mejor[2]:
+            mejor = (ruta, version_texto, version_tupla)
+    if mejor is None:
+        return None
+    return mejor[0], mejor[1]
 
 
 async def _procesar_foto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,6 +217,32 @@ def device_wake(x_device_token: str | None = Header(default=None)):
             "X-Fw-Version": FW_VERSION,
             "X-Image-Checksum": str(metadata["checksum"]),
         },
+    )
+
+
+@app.get("/device/firmware")
+def device_firmware(x_device_token: str | None = Header(default=None)):
+    """Sirve el binario OTA más reciente subido a mano a FIRMWARE_DIR
+    (D-012/D-027). Mismo token que /device/wake (D-013). El dispositivo
+    decide él mismo si la versión es más nueva que la que tiene corriendo
+    (X-Fw-Version acá describe el binario que se está sirviendo, distinto
+    del X-Fw-Version de /device/wake — D-015 — que es la versión mínima de
+    protocolo que el servidor anuncia, no la de ningún binario en
+    particular)."""
+    if x_device_token is None or not secrets.compare_digest(
+        x_device_token, DEVICE_AUTH_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="token ausente o inválido")
+
+    encontrado = _firmware_mas_reciente()
+    if encontrado is None:
+        raise HTTPException(status_code=404, detail="no hay firmware disponible todavía")
+
+    ruta, version = encontrado
+    return Response(
+        content=ruta.read_bytes(),
+        media_type="application/octet-stream",
+        headers={"X-Fw-Version": version},
     )
 
 

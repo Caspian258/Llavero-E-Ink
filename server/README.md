@@ -279,3 +279,76 @@ actualiza igual, pero el intento de responder en el chat falla en el log
 del servidor sin tumbarlo.
 
 `data/` no se versiona (ver `.gitignore`).
+
+## OTA: subir un firmware nuevo (D-012/D-027)
+
+`GET /device/firmware` sirve el binario OTA más reciente que haya en
+`server/data/firmware/`, con el mismo `X-Device-Token` que `/device/wake`
+(D-013). No hay pipeline de CI/CD — la subida es manual, a propósito
+(fuera de alcance de esta tarea).
+
+### 1. Compilar el firmware con la versión nueva
+
+Antes de compilar, subir a mano `FW_VERSION` en
+`firmware/llavero/src/main.cpp` (ej. de `"0.1.0"` a `"0.2.0"`):
+
+```bash
+cd firmware/llavero
+pio run
+```
+
+El binario queda en `.pio/build/seeed_xiao_esp32c3/firmware.bin`.
+
+### 2. Subir el binario al servidor con el nombre correcto
+
+El endpoint solo reconoce archivos con el patrón exacto
+`llavero-<version>.bin` (ej. `llavero-0.2.0.bin`) dentro de
+`server/data/firmware/` — cualquier otro nombre se ignora en silencio (no
+rompe nada, simplemente no se sirve). La versión se compara numéricamente
+por segmento, no como texto, así que `llavero-0.10.0.bin` se reconoce
+correctamente como más nueva que `llavero-0.9.0.bin`.
+
+```bash
+# renombrar localmente antes de subir
+cp firmware/llavero/.pio/build/seeed_xiao_esp32c3/firmware.bin /tmp/llavero-0.2.0.bin
+
+# subir por scp al VPS (D-022: usuario de sistema "llavero", repo en
+# /home/llavero/Llavero-E-Ink)
+scp /tmp/llavero-0.2.0.bin llavero@<IP-DEL-VPS>:/home/llavero/Llavero-E-Ink/server/data/firmware/
+```
+
+Si el `scp` se hace como `root` en vez de como el usuario `llavero`,
+ajustar los permisos después para que el proceso del servicio
+(`llavero.service`, corriendo como `llavero`) pueda leer el archivo:
+
+```bash
+chown llavero:llavero /home/llavero/Llavero-E-Ink/server/data/firmware/llavero-0.2.0.bin
+```
+
+**No hace falta reiniciar `llavero.service`** — el endpoint lee el
+directorio en cada request, no cachea nada.
+
+### 3. Probar con curl
+
+```bash
+curl -i http://localhost:8000/device/firmware -H "X-Device-Token: un-token-de-prueba-cualquiera"
+# 200, header X-Fw-Version: 0.2.0, body = el binario
+
+curl -i http://localhost:8000/device/firmware
+# 401 (sin token)
+```
+
+Si `server/data/firmware/` está vacío (o no existe todavía), responde
+`404` — comportamiento esperado antes de subir el primer binario, no un
+error.
+
+### 4. Qué compara el dispositivo
+
+`X-Fw-Version` de `/device/firmware` describe el binario que se está
+sirviendo — **no** es el mismo valor que `X-Fw-Version` de `/device/wake`
+(ese sigue siendo la versión mínima de protocolo que el servidor anuncia,
+D-015, no la versión de un binario). El dispositivo compara el
+`X-Fw-Version` de `/device/firmware` contra su propio `FW_VERSION`
+compilado (`firmware/llavero/src/main.cpp`) y solo aplica la
+actualización si la del servidor es numéricamente mayor — ver
+`firmware/llavero/README.md` para el flujo completo con hardware real.

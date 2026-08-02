@@ -8,10 +8,12 @@ guardadas en NVS, portal cautivo como fallback, backoff exponencial —
 D-010, D-011, D-020), un cliente HTTPS que consulta
 `GET https://caspiandomain.dev/device/wake` (D-008/D-009) tras conectar,
 valida el certificado TLS real (sin `setInsecure()`), y descarga el buffer
-de imagen solo si el checksum cambió (D-023) y, desde D-024, el pintado
-real de ese buffer en el panel e-ink con GxEPD2 — solo cuando la imagen es
-nueva, seguido siempre de `display.hibernate()` antes de dormir. Todavía
-**no** hay OTA — tarea separada que viene después.
+de imagen solo si el checksum cambió (D-023), el pintado real de ese
+buffer en el panel e-ink con GxEPD2 (D-024) — solo cuando la imagen es
+nueva, seguido siempre de `display.hibernate()` antes de dormir — y, desde
+D-027, actualización OTA vía `GET https://caspiandomain.dev/device/firmware`
+con rollback automático de ESP-IDF si el firmware nuevo no llega a
+completar un ciclo funcional (D-012).
 
 ## Compilar
 
@@ -70,7 +72,12 @@ antes de reintentar.
    - **Si falla** (error de conexión/TLS, 401, 503, o cualquier código
      que no sea 200): no resetea el backoff, se trata igual que un fallo
      de Wi-Fi — aplica backoff exponencial y duerme ese intervalo.
-   - OTA queda para una tarea posterior.
+   - **Si tuvo éxito:** además, marca este firmware como válido ante el
+     bootloader (`esp_ota_mark_app_valid_cancel_rollback()`, D-012/D-027)
+     y consulta `GET /device/firmware` (D-027) por separado — si hay una
+     versión más nueva que `FW_VERSION`, la descarga y aplica. Un fallo
+     acá (servidor sin firmware subido, red, etc.) solo se loggea, no
+     afecta el ciclo de imagen ni el `dormir()` que sigue.
 4. **Si no hay redes guardadas, o si `WiFiMulti` no logra conectar:**
    levanta el portal cautivo — AP `Llavero-Setup` (abierto) + página de
    configuración en `192.168.4.1`, durante hasta 5 minutos.
@@ -301,3 +308,94 @@ Durmiendo 900 segundos
 El mensaje de error exacto depende de la causa (timeout, DNS, TLS) — lo
 importante es que el dispositivo no se cuelga ni crashea, loggea el error
 y sigue el mismo camino de backoff que cualquier otro fallo.
+
+## Prueba manual de OTA (requiere hardware real + servidor real)
+
+**No hay forma de verificar un ciclo de OTA completo sin un XIAO ESP32C3
+real** — el rollback automático de ESP-IDF, la escritura real de una
+partición, y que el dispositivo efectivamente arranque con el firmware
+nuevo en el siguiente despertar, son todo comportamiento del chip real.
+Ver `server/README.md` ("OTA: subir un firmware nuevo") para el lado del
+servidor.
+
+### 1. Preparar una versión "nueva"
+
+En `firmware/llavero/src/main.cpp`, subir `FW_VERSION` (ej. de `"0.1.0"`
+a `"0.2.0"`) — es lo único que hace falta para simular una actualización
+real. Opcionalmente, agregar algo visible al log (ej. un
+`Serial.println("SOY LA VERSION NUEVA")` en `setup()`) para confirmar a
+simple vista, por el monitor serie, que el dispositivo terminó corriendo
+el binario nuevo y no el viejo.
+
+```bash
+cd firmware/llavero
+pio run
+```
+
+### 2. Flashear la versión VIEJA primero, dejarla corriendo
+
+Para que haya algo de qué "actualizar", primero flashear la versión
+**vieja** (`FW_VERSION = "0.1.0"`, sin el cambio del paso 1) y dejar que
+complete al menos un ciclo exitoso (Wi-Fi + `/device/wake`) — así queda
+marcada válida ante el bootloader antes de intentar el OTA.
+
+```bash
+pio run --target upload
+pio device monitor --baud 115200
+```
+
+Confirmar en el log que llega hasta `Durmiendo <N> segundos` sin errores.
+
+### 3. Subir la versión nueva al servidor (sin flashearla al dispositivo)
+
+Compilar la versión con `FW_VERSION` subido (paso 1) y subir **ese**
+binario al servidor siguiendo `server/README.md` — el dispositivo sigue
+corriendo la versión vieja, va a ser él quien se actualice solo.
+
+### 4. Dejar que el dispositivo se actualice solo
+
+Provocar el siguiente despertar (esperar el `X-Sleep-Seconds` real, o
+resetear a mano). Log esperado:
+
+```
+Conectado a <SSID>, IP <IP>
+Consultando https://caspiandomain.dev/device/wake ...
+Respuesta OK. X-Fw-Version=0.1.0, X-Sleep-Seconds=<N>, X-Image-Checksum=<hex>
+Imagen sin cambios, no se descarga.
+OTA: consultando https://caspiandomain.dev/device/firmware ...
+OTA: versión disponible en el servidor: 0.2.0 (actual: 0.1.0)
+OTA: versión nueva detectada, descargando y aplicando...
+OTA: actualización escrita OK. Arranca con el firmware nuevo en el próximo despertar.
+Durmiendo <N> segundos
+```
+
+Nota: no hay reinicio inmediato a propósito (ver comentario en
+`verificarActualizacionFirmware()`) — el dispositivo duerme normal y el
+firmware nuevo arranca recién en el **próximo** despertar por temporizador,
+no en este ciclo.
+
+### 5. Confirmar que arrancó con el firmware nuevo
+
+En el siguiente despertar, el log debería mostrar el mensaje que se haya
+agregado en el paso 1 (ej. "SOY LA VERSION NUEVA"), y la consulta de OTA
+ya no debería encontrar nada nuevo:
+
+```
+OTA: consultando https://caspiandomain.dev/device/firmware ...
+OTA: versión disponible en el servidor: 0.2.0 (actual: 0.2.0)
+OTA: no hay versión más nueva. Nada que hacer.
+```
+
+### 6. Probar el rollback (opcional, requiere provocar un fallo real)
+
+Para confirmar el rollback automático de ESP-IDF sin reimplementarlo:
+subir a propósito un binario roto (ej. un archivo `.bin` que no sea un
+firmware válido, o una versión que crashee apenas arranca antes de llegar
+a completar un ciclo Wi-Fi + `/device/wake`) con una versión mayor.
+Esperado: el dispositivo lo descarga y lo arranca, crashea/reinicia antes
+de llamar a `marcarFirmwareValido()`, y el bootloader de ESP-IDF revierte
+solo a la versión anterior en el siguiente arranque — confirmable viendo
+que el log vuelve a mostrar la versión vieja sin que nadie haya
+reflasheado nada por USB. Este paso puede dejar el dispositivo en un
+ciclo de reinicios hasta que el rollback se complete; tener el monitor
+serie abierto para verlo en vivo.

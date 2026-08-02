@@ -3,11 +3,13 @@
 #include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <GxEPD2_BW.h>
 #include "esp_sleep.h"
+#include "esp_ota_ops.h"
 #include "cert_raiz.h"
 
 // Pinout de la pantalla e-ink en la PCB final (D-021, no el de breadboard
@@ -40,6 +42,18 @@ constexpr uint32_t TIMEOUT_HTTP_MS = 15000;
 constexpr uint16_t ANCHO_PANTALLA = 200;
 constexpr uint16_t ALTO_PANTALLA = 200;
 constexpr size_t TAMANO_BUFFER_ESPERADO = 5000;  // D-009: 200x200/8, 1bpp
+
+// ---------- OTA (D-004, D-012, D-027) ----------
+constexpr const char *URL_DEVICE_FIRMWARE = "https://caspiandomain.dev/device/firmware";
+
+// Versión de ESTE firmware compilado. Distinta del X-Fw-Version que
+// devuelve /device/wake (D-015: la versión mínima que el servidor anuncia
+// como compatible para el protocolo de imagen — un concepto de
+// compatibilidad de API, no la versión real de ningún binario). Esta es
+// la que se compara contra /device/firmware para decidir si hay una
+// actualización real que aplicar (D-027). Subir a mano en cada release,
+// junto con el nombre del .bin que se sube al servidor — ver README.
+constexpr const char *FW_VERSION = "0.1.0";
 
 // Placeholder para cuando no hay token guardado en NVS todavía. Nunca es el
 // token real de producción — ese vive solo en NVS del dispositivo, jamás en
@@ -292,6 +306,153 @@ bool consultarServidor(uint32_t &segundosDormir) {
   return true;
 }
 
+// ---------- OTA ----------
+
+// Confirma ante el bootloader que ESTE firmware completó un ciclo
+// funcional exitoso (Wi-Fi + /device/wake), cancelando cualquier rollback
+// pendiente (D-004/D-012). Se llama SIEMPRE tras un ciclo exitoso, no solo
+// la primera vez después de instalar un OTA:
+// esp_ota_mark_app_valid_cancel_rollback() es idempotente — si la
+// partición ya estaba marcada válida, no hace nada (confirmado contra
+// esp_ota_ops.h del SDK). Si el firmware nuevo NUNCA llega a este punto
+// (crash, reinicio inesperado antes de completar el ciclo), el bootloader
+// de ESP-IDF revierte solo a la partición anterior en el siguiente
+// arranque — comportamiento nativo
+// (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, confirmado en el sdkconfig
+// del ESP32-C3 que usa este framework), no reimplementado a mano.
+void marcarFirmwareValido() {
+  esp_err_t resultado = esp_ota_mark_app_valid_cancel_rollback();
+  if (resultado != ESP_OK) {
+    Serial.printf("No se pudo marcar el firmware como válido (err=%d)\n", (int)resultado);
+  }
+}
+
+// Compara dos versiones "x.y.z" numéricamente, segmento por segmento — no
+// como texto, para que "0.10.0" no se lea como menor que "0.9.0" por
+// comparación de caracteres (D-027). Devuelve true si `remota` es
+// estrictamente mayor que `local`.
+bool versionEsMayor(const String &remota, const String &local) {
+  int iRemota = 0, iLocal = 0;
+  while (iRemota < (int)remota.length() || iLocal < (int)local.length()) {
+    int finRemota = remota.indexOf('.', iRemota);
+    int finLocal = local.indexOf('.', iLocal);
+    String segRemota = (finRemota == -1) ? remota.substring(iRemota) : remota.substring(iRemota, finRemota);
+    String segLocal = (finLocal == -1) ? local.substring(iLocal) : local.substring(iLocal, finLocal);
+    int numRemota = segRemota.length() ? segRemota.toInt() : 0;
+    int numLocal = segLocal.length() ? segLocal.toInt() : 0;
+    if (numRemota != numLocal) return numRemota > numLocal;
+    iRemota = (finRemota == -1) ? remota.length() : finRemota + 1;
+    iLocal = (finLocal == -1) ? local.length() : finLocal + 1;
+  }
+  return false;  // iguales
+}
+
+// Revisa si hay firmware nuevo en /device/firmware (D-012/D-027) y lo
+// aplica si la versión remota es mayor a FW_VERSION. Independiente del
+// ciclo de imagen: se llama después de una consulta exitosa a
+// /device/wake, pero un fallo acá (red, o el servidor simplemente no
+// tiene ningún firmware subido todavía) solo se loggea — nunca bloquea ni
+// afecta el dormir() que sigue.
+//
+// RIESGO CONOCIDO, NO RESUELTO (D-027): este proyecto no mide batería
+// (D-006, decisión ya tomada). Un corte de energía real a mitad de la
+// escritura OTA (Update.write() escribiendo la partición nueva) podría
+// dejar esa partición a medio escribir. El rollback de ESP-IDF protege
+// contra un firmware que SÍ terminó de escribirse pero falla al arrancar
+// o al completar un ciclo — no protege contra un corte de energía literal
+// a mitad del propio proceso de escritura. Queda fuera del alcance de
+// esta tarea, aceptado como riesgo del proyecto.
+void verificarActualizacionFirmware() {
+  WiFiClientSecure clienteConsulta;
+  clienteConsulta.setCACert(CERT_RAIZ);
+  clienteConsulta.setTimeout(TIMEOUT_HTTP_MS / 1000);
+  clienteConsulta.setHandshakeTimeout(TIMEOUT_HTTP_MS / 1000);
+
+  HTTPClient http;
+  http.setConnectTimeout(TIMEOUT_HTTP_MS);
+  http.setTimeout(TIMEOUT_HTTP_MS);
+
+  if (!http.begin(clienteConsulta, URL_DEVICE_FIRMWARE)) {
+    Serial.println("OTA: no se pudo iniciar la conexión HTTPS.");
+    return;
+  }
+
+  String token = leerTokenDispositivo();
+  http.addHeader("X-Device-Token", token);
+
+  const char *encabezados[] = {"X-Fw-Version"};
+  http.collectHeaders(encabezados, 1);
+
+  Serial.printf("OTA: consultando %s ...\n", URL_DEVICE_FIRMWARE);
+  int codigo = http.GET();
+
+  if (codigo == HTTP_CODE_NOT_FOUND) {
+    Serial.println("OTA: el servidor no tiene ningún firmware disponible todavía.");
+    http.end();
+    return;
+  }
+  if (codigo <= 0) {
+    Serial.printf("OTA: error de conexión HTTPS: %s (%d)\n", HTTPClient::errorToString(codigo).c_str(), codigo);
+    http.end();
+    return;
+  }
+  if (codigo != HTTP_CODE_OK) {
+    Serial.printf("OTA: el servidor respondió con código %d\n", codigo);
+    http.end();
+    return;
+  }
+  if (!http.hasHeader("X-Fw-Version")) {
+    Serial.println("OTA: respuesta 200 sin X-Fw-Version, se ignora.");
+    http.end();
+    return;
+  }
+
+  String versionRemota = http.header("X-Fw-Version");
+  http.end();  // cierra esta consulta; httpUpdate.update() abre su propia conexión
+
+  Serial.printf("OTA: versión disponible en el servidor: %s (actual: %s)\n", versionRemota.c_str(), FW_VERSION);
+
+  if (!versionEsMayor(versionRemota, FW_VERSION)) {
+    Serial.println("OTA: no hay versión más nueva. Nada que hacer.");
+    return;
+  }
+
+  Serial.println("OTA: versión nueva detectada, descargando y aplicando...");
+
+  // No reiniciar automáticamente al terminar: Update.h ya deja la
+  // partición nueva marcada como la próxima a arrancar
+  // (esp_ota_set_boot_partition(), confirmado en Updater.cpp) y el
+  // dispositivo va a dormir normalmente después de esto. El PRÓXIMO
+  // despertar por temporizador ya arranca el firmware nuevo: el deep
+  // sleep en ESP32 reinicia el chip por completo, así que el bootloader
+  // vuelve a elegir partición como en cualquier arranque — no hace falta
+  // un reinicio inmediato aparte.
+  httpUpdate.rebootOnUpdate(false);
+
+  WiFiClientSecure clienteOta;
+  clienteOta.setCACert(CERT_RAIZ);
+  clienteOta.setTimeout(TIMEOUT_HTTP_MS / 1000);
+  clienteOta.setHandshakeTimeout(TIMEOUT_HTTP_MS / 1000);
+
+  t_httpUpdate_return resultado = httpUpdate.update(
+      clienteOta, URL_DEVICE_FIRMWARE, FW_VERSION,
+      [token](HTTPClient *httpInterno) { httpInterno->addHeader("X-Device-Token", token); });
+
+  switch (resultado) {
+    case HTTP_UPDATE_OK:
+      Serial.println("OTA: actualización escrita OK. Arranca con el firmware nuevo en el próximo despertar.");
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("OTA: httpUpdate no encontró nada para actualizar (inesperado, ya se había confirmado versión nueva).");
+      break;
+    case HTTP_UPDATE_FAILED:
+    default:
+      Serial.printf("OTA: falló la actualización: %s (%d)\n", httpUpdate.getLastErrorString().c_str(),
+                    httpUpdate.getLastError());
+      break;
+  }
+}
+
 // ---------- Portal cautivo ----------
 
 // CSS inline compartido por las tres páginas (formulario, confirmación,
@@ -441,14 +602,17 @@ void setup() {
     if (estado == WL_CONNECTED) {
       Serial.printf("Conectado a %s, IP %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 
-      // El pintado de pantalla y OTA son tareas separadas (fuera del
-      // alcance de esta tarea): por ahora el buffer descargado queda en
-      // RAM y solo se loggea. Un fallo de servidor (consultarServidor()
-      // devuelve false) NO resetea el backoff — se trata igual que un
-      // fallo de Wi-Fi (D-010).
+      // Un fallo de servidor (consultarServidor() devuelve false) NO
+      // resetea el backoff — se trata igual que un fallo de Wi-Fi (D-010).
       uint32_t segundosDormir = INTERVALO_BASE_S;
       if (consultarServidor(segundosDormir)) {
         resetearBackoff();
+        // Ciclo funcional completo (Wi-Fi + /device/wake) — confirma este
+        // firmware ante el bootloader (D-012/D-027) antes de dormir.
+        marcarFirmwareValido();
+        // Chequeo de OTA independiente del de imagen (D-027): si falla,
+        // solo se loggea, no afecta el dormir() que sigue.
+        verificarActualizacionFirmware();
         dormir(segundosDormir);
       } else {
         Serial.println("Fallo al consultar el servidor. Aplicando backoff.");
