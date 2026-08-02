@@ -3,12 +3,14 @@
 Proyecto PlatformIO del firmware final del dispositivo, separado de
 `firmware/test-consumo/` (diagnóstico de Fase 1, cerrado, no se toca).
 
-**Esta tarea implementa solo la capa de conectividad Wi-Fi:**
-`WiFiMulti` con redes guardadas en NVS, portal cautivo como fallback, y
-backoff exponencial persistido (D-010, D-011, D-020). Todavía **no** hay
-cliente HTTPS, pintado de pantalla, ni OTA — esas son tareas separadas
-que vienen después. Por ahora, una conexión exitosa solo se confirma por
-Serial y el dispositivo vuelve a dormir.
+**Qué incluye hasta ahora:** conectividad Wi-Fi (`WiFiMulti`, redes
+guardadas en NVS, portal cautivo como fallback, backoff exponencial —
+D-010, D-011, D-020) y, desde D-023, un cliente HTTPS que consulta
+`GET https://caspiandomain.dev/device/wake` (D-008/D-009) tras conectar,
+valida el certificado TLS real (sin `setInsecure()`), y descarga el buffer
+de imagen solo si el checksum cambió. Todavía **no** hay pintado de
+pantalla ni OTA — el buffer descargado queda en RAM, solo se loggea su
+tamaño y checksum; son tareas separadas que vienen después.
 
 ## Compilar
 
@@ -49,9 +51,20 @@ antes de reintentar.
 2. Si hay al menos una red guardada, intenta conectar (`WiFiMulti::run()`,
    hasta 15 s). `WiFiMulti` decide el orden por señal — comportamiento
    nativo de la librería, no reimplementado.
-3. **Si conecta:** imprime la IP por Serial, resetea el backoff a 900 s
-   (15 min) y duerme ese intervalo. (El ciclo completo de descarga +
-   pintado llega en una tarea posterior.)
+3. **Si conecta:** imprime la IP por Serial y llama a
+   `GET /device/wake` (D-023) con el `X-Device-Token` guardado en NVS,
+   validando TLS contra `cert_raiz.h`.
+   - **Si el servidor responde 200:** compara `X-Image-Checksum` contra
+     el último guardado en NVS. Si es igual, no descarga el body. Si es
+     distinto (o no había ninguno guardado), descarga los 5000 bytes a un
+     buffer en RAM, loggea tamaño y checksum, y guarda el checksum nuevo.
+     En ambos casos resetea el backoff a 900 s y duerme los segundos que
+     indicó el servidor en `X-Sleep-Seconds` (D-005/D-009 — el servidor
+     controla el horario real, no un intervalo fijo del firmware).
+   - **Si falla** (error de conexión/TLS, 401, 503, o cualquier código
+     que no sea 200): no resetea el backoff, se trata igual que un fallo
+     de Wi-Fi — aplica backoff exponencial y duerme ese intervalo.
+   - Pintado de pantalla y OTA quedan para tareas posteriores.
 4. **Si no hay redes guardadas, o si `WiFiMulti` no logra conectar:**
    levanta el portal cautivo — AP `Llavero-Setup` (abierto) + página de
    configuración en `192.168.4.1`, durante hasta 5 minutos.
@@ -136,8 +149,12 @@ mostrar:
 Red guardada cargada (0): <SSID que escribiste>
 Buscando 1 red(es) guardada(s)...
 Conectado a <SSID que escribiste>, IP <IP asignada por esa red>
-Durmiendo 900 segundos
+Consultando https://caspiandomain.dev/device/wake ...
 ```
+
+seguido de la respuesta del cliente HTTPS (D-023) — ver la sección de
+abajo, "Prueba manual del cliente HTTPS", para qué esperar ahí según si
+hay token configurado, si el checksum cambió, etc.
 
 Si en cambio no conecta (contraseña mal escrita, red fuera de rango),
 debería volver a levantar el portal cautivo y, si tampoco se configura
@@ -157,3 +174,117 @@ nuevo intento).
 - **Reintroducir el mismo SSID con una password distinta**: debe
   actualizar la password existente en su índice, no crear una entrada
   duplicada (log: "Red existente actualizada").
+
+## Prueba manual del cliente HTTPS (requiere hardware real + internet + servidor real)
+
+**No hay forma de verificar esto sin un XIAO ESP32C3 real, conectado a
+una red con internet de verdad, contra el servidor real en
+`https://caspiandomain.dev`** — la negociación TLS contra el certificado
+real, la respuesta real del servidor y la comparación de checksum en la
+práctica no se pueden simular ni mockear de forma útil. Lo que sigue es
+el flujo que le toca al usuario.
+
+### 1. Configurar el token real (`X-Device-Token`)
+
+**No hay todavía una forma de cargar esto sin recompilar, a diferencia de
+las redes Wi-Fi** (D-023) — el portal cautivo actual solo tiene campos de
+SSID/password. Hasta que se agregue esa interfaz (tarea futura), el paso
+más simple es flashear una vez un sketch mínimo separado que solo escribe
+el token en NVS, y después volver a flashear el firmware real:
+
+1. Guardar esto como `/tmp/set_token/src/main.cpp` (o cualquier carpeta
+   fuera del repo) con su propio `platformio.ini` mínimo
+   (`[env:seeed_xiao_esp32c3]` igual al de `firmware/llavero/`):
+
+   ```cpp
+   #include <Arduino.h>
+   #include <Preferences.h>
+
+   void setup() {
+     Serial.begin(115200);
+     delay(2000);
+     Preferences prefs;
+     prefs.begin("llavero", false);
+     prefs.putString("deviceToken", "PEGAR_AQUI_EL_TOKEN_REAL_DE_PRODUCCION");
+     prefs.end();
+     Serial.println("Token guardado en NVS.");
+   }
+
+   void loop() {}
+   ```
+
+2. `pio run --target upload` desde esa carpeta temporal, confirmar por
+   `pio device monitor` que imprime "Token guardado en NVS."
+3. Volver a `firmware/llavero/` y `pio run --target upload` para
+   reflashear el firmware real — el token queda en NVS, sobrevive el
+   reflasheo del firmware (NVS es una partición separada del código).
+
+Este token es el mismo que ya generaste para `server/.env`
+(`DEVICE_AUTH_TOKEN` en el VPS, D-022) — tienen que coincidir.
+
+### 2. Escenario: imagen nueva
+
+Con una imagen real cargada en el servidor (vía el bot de Telegram) que
+todavía no se descargó nunca en este dispositivo:
+
+```
+Conectado a <SSID>, IP <IP>
+Consultando https://caspiandomain.dev/device/wake ...
+Respuesta OK. X-Fw-Version=0.1.0, X-Sleep-Seconds=<N>, X-Image-Checksum=<hex>
+Imagen nueva descargada: 5000 bytes, checksum <hex>
+Durmiendo <N> segundos
+```
+
+`<N>` (los segundos de sueño) los decide el servidor (D-005) — no tiene
+por qué ser 900.
+
+### 3. Escenario: imagen sin cambios
+
+Repitiendo el ciclo (o forzando un arranque manual) sin haber mandado una
+imagen nueva por Telegram desde la última vez:
+
+```
+Conectado a <SSID>, IP <IP>
+Consultando https://caspiandomain.dev/device/wake ...
+Respuesta OK. X-Fw-Version=0.1.0, X-Sleep-Seconds=<N>, X-Image-Checksum=<hex>
+Imagen sin cambios, no se descarga.
+Durmiendo <N> segundos
+```
+
+Mismo checksum que la vez anterior — confirma que la comparación contra
+NVS funciona y que no se gasta batería/tiempo bajando los 5000 bytes de
+nuevo.
+
+### 4. Escenario: token incorrecto
+
+Con el sketch temporal del paso 1, guardar a propósito un token que NO
+coincida con `DEVICE_AUTH_TOKEN` del servidor:
+
+```
+Conectado a <SSID>, IP <IP>
+Consultando https://caspiandomain.dev/device/wake ...
+El servidor respondió con código 401 (se esperaba 200)
+Fallo al consultar el servidor. Aplicando backoff.
+Durmiendo 900 segundos
+```
+
+(900 la primera vez — el backoff avanza en arranques sucesivos si el
+problema persiste, igual que un fallo de Wi-Fi.)
+
+### 5. Escenario: servidor caído o inalcanzable
+
+Cortar la conectividad del VPS (o simplemente apagar `systemctl stop
+llavero` en el servidor, D-022, para esta prueba) y dejar que el
+dispositivo intente conectarse:
+
+```
+Conectado a <SSID>, IP <IP>
+Consultando https://caspiandomain.dev/device/wake ...
+Error de conexión HTTPS: <descripción> (<código negativo>)
+Fallo al consultar el servidor. Aplicando backoff.
+Durmiendo 900 segundos
+```
+
+El mensaje de error exacto depende de la causa (timeout, DNS, TLS) — lo
+importante es que el dispositivo no se cuelga ni crashea, loggea el error
+y sigue el mismo camino de backoff que cualquier otro fallo.

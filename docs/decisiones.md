@@ -449,3 +449,149 @@ pintado/HTTPS es la que los va a consumir).
 Verificación: `pio run` dentro de `firmware/llavero/` compila limpio (0
 errores, 0 warnings) en una recompilación completa desde cero con los
 pines nuevos. `firmware/test-consumo/` no se tocó.
+
+## D-022 — Servidor desplegado en producción (2026-08-02)
+
+Complementa D-007/D-008/D-009: el backend descrito ahí ya está desplegado
+y corriendo de verdad, no solo diseñado.
+
+**Hosting:** VPS Hetzner CX23, datacenter Helsinki, IP `65.108.156.195`.
+Nota: D-007 había estimado un CX22; el plan efectivamente contratado es
+CX23. D-007 no se edita — esta entrada documenta el dato real de
+producción.
+
+**Dominio y TLS:** `caspiandomain.dev`, DNS apuntado directo al VPS (sin
+proxy de Cloudflare por delante). Caddy sirve como reverse proxy hacia
+`uvicorn` en `127.0.0.1:8000` y obtiene/renueva el certificado TLS
+automáticamente vía Let's Encrypt — sin configuración manual de certbot,
+que era justo el motivo de elegir Caddy en vez de nginx+certbot.
+
+**Persistencia y seguridad del proceso:** el servidor corre como
+servicio `systemd` (`llavero.service`), habilitado al arranque
+(`systemctl enable`) y con `Restart=on-failure` para recuperarse solo si
+el proceso muere. Corre bajo un usuario de sistema dedicado no-root
+(`llavero`, home propio en `/home/llavero`) — el proceso FastAPI/uvicorn
+nunca corre como root, y `uvicorn` solo escucha en `127.0.0.1:8000`
+(nunca expuesto directo a internet; todo el tráfico externo entra por
+Caddy en 80/443).
+
+**Confirmado end-to-end:** una foto real mandada por Telegram se procesó
+por el pipeline (D-018) y quedó servida correctamente por
+`GET /device/wake` sobre HTTPS real del dominio de producción — el camino
+completo webhook → pipeline → `current.bin`/`current.json` →
+`/device/wake` funciona en producción, no solo en pruebas locales.
+
+## D-023 — Cliente HTTPS en el firmware: certificado raíz real y comparación de checksum (2026-08-02)
+
+Agrega a `firmware/llavero/` la llamada a `GET /device/wake` (D-008/D-009)
+después de una conexión Wi-Fi exitosa. No incluye pintado de pantalla ni
+OTA — el buffer descargado queda en RAM y solo se loggea su tamaño y
+checksum; son tareas separadas que vienen después. La lógica de Wi-Fi
+existente (D-010/D-011/D-020) no se tocó.
+
+**Hallazgo importante: el certificado raíz real de producción NO es el
+que se había asumido.** El planteamiento de la tarea pedía embeber
+ISRG Root X1 "verificado contra la documentación oficial, no de memoria".
+Se verificó — y **la cadena real que sirve `caspiandomain.dev` en
+producción no termina en X1, termina en ISRG Root X2** (confirmado con
+`openssl s_client -connect caspiandomain.dev:443 -showcerts` contra el
+servidor real):
+
+```
+caspiandomain.dev → Let's Encrypt "YE2" → ISRG "Root YE" → ISRG Root X2
+```
+
+Se reprodujo la verificación de cadena con `openssl verify` en modo
+aislado (`-no-CAstore -no-CApath`, para que no la disimule el almacén de
+confianza del sistema): **con solo ISRG Root X1 como raíz confiable, la
+verificación falla** (`unable to get local issuer certificate` al llegar
+a "Root YE"); con ISRG Root X1 **y** ISRG Root X2 concatenados, verifica
+OK. Si se hubiera embebido solo X1 como pedía el planteamiento original,
+el cliente HTTPS del dispositivo habría fallado la validación TLS contra
+el servidor real de producción — el problema no se habría notado hasta
+probar con hardware real.
+
+**Decisión:** `firmware/llavero/src/cert_raiz.h` embebe **ambas** raíces
+(ISRG Root X1 RSA y ISRG Root X2 ECDSA), descargadas y verificadas contra
+`letsencrypt.org/certs/isrgrootx1.pem` y `letsencrypt.org/certs/isrg-root-x2.pem`
+(enlazados desde la página oficial `letsencrypt.org/certificates/`),
+confirmando SHA-256 de cada una con `openssl x509 -fingerprint -sha256`
+contra los valores públicos conocidos. Un solo `setCACert()` con las dos
+concatenadas alcanza: `mbedtls_x509_crt_parse()` (la función que usa
+`WiFiClientSecure` internamente, verificado en
+`WiFiClientSecure/src/ssl_client.cpp` del core arduino-esp32 instalado)
+acepta varios certificados PEM en un mismo buffer y los agrega todos como
+raíces de confianza. Esto además deja al dispositivo tolerante si
+Let's Encrypt cambia de cuál raíz usa para este dominio en el futuro — no
+hace falta elegir una sola de antemano. No se usa `setInsecure()` (D-008).
+
+**APIs verificadas contra el código fuente instalado, no asumidas:**
+
+- `WiFiClientSecure::setCACert(const char*)` — un solo `const char*` con
+  el PEM completo (posiblemente varios certificados concatenados).
+- `WiFiClientSecure::setTimeout(uint32_t)` y `setHandshakeTimeout(unsigned long)`
+  toman **segundos** (multiplican por 1000 internamente) — distinto de
+  `HTTPClient::setTimeout(uint16_t)`/`setConnectTimeout(int32_t)`, que
+  toman **milisegundos**. Mezclar las unidades sin verificar habría dejado
+  timeouts diez o mil veces más cortos o largos de lo esperado.
+- `HTTPClient::collectHeaders(headerKeys[], count)` es obligatorio antes
+  de `GET()` para poder leer headers de respuesta custom con
+  `header()`/`hasHeader()` — sin esto, `X-Sleep-Seconds`/`X-Fw-Version`/
+  `X-Image-Checksum` no aparecen aunque el servidor los mande (la API por
+  default no expone headers arbitrarios de la respuesta).
+- `HTTPClient::GET()` devuelve un código HTTP positivo o un
+  `HTTPC_ERROR_*` negativo (fallo de conexión/TLS, no HTTP) — se
+  distinguen explícitamente en el manejo de errores.
+
+**Comparación de checksum (D-009).** Nueva clave de NVS `ultimoChecksum`
+(namespace `llavero` ya existente). Si `X-Image-Checksum` coincide con el
+guardado: loggea "Imagen sin cambios, no se descarga" y no lee el body —
+ahorra el ciclo activo completo, tal como plantea D-009. Si es distinto o
+no hay checksum guardado: lee el body con `http.getStream().readBytes()`
+hacia un buffer de 5000 bytes, verifica el tamaño real leído contra el
+esperado (loggea sin crashear si no coincide, y en ese caso NO guarda el
+checksum nuevo — para que el próximo ciclo reintente la descarga en vez
+de darla por buena), y solo si el tamaño coincide guarda el checksum
+nuevo en NVS.
+
+El buffer de 5000 bytes es `static` dentro de la función, no una variable
+de pila: es más de la mitad del stack default de la tarea de Arduino en
+ESP32 (8 KB), y la función ya corre en medio de un handshake TLS con su
+propio uso de stack — un arreglo local de ese tamaño ahí arriesgaba
+overflow. `static` lo pone en `.bss`, sin competir con la pila.
+
+**Backoff unificado (D-010).** `consultarServidor()` devuelve `false`
+ante *cualquier* fallo — error de conexión/TLS, código HTTP distinto de
+200, o headers faltantes (incluye 401 de token incorrecto y 503 de
+"todavía no hay imagen"). El llamador solo resetea el backoff si devuelve
+`true`; si devuelve `false`, aplica el mismo
+`avanzarBackoffYObtenerIntervaloActual()` que ya existía para fallos de
+Wi-Fi — un fallo de servidor no se trata distinto, tal como pide la
+tarea.
+
+**Token del dispositivo — mismo patrón que las redes Wi-Fi, con una
+brecha real.** `X-Device-Token` se guarda en NVS (clave `deviceToken`,
+namespace `llavero`), no en el código fuente — evita exponer el token
+real de producción en el repo público. Si no hay token guardado, se usa
+el placeholder `REEMPLAZAR_CON_TOKEN_REAL` con una advertencia explícita
+por Serial (el servidor lo va a rechazar con 401, comportamiento visible,
+no un fallo silencioso). **A diferencia de las redes Wi-Fi, todavía no
+hay ninguna interfaz (portal cautivo o Serial) para cargar este token sin
+recompilar** — el portal cautivo actual solo maneja SSID/password. Como
+paso temporal documentado en el README, se flashea una vez un sketch
+mínimo separado que solo escribe la clave en NVS, y después se vuelve a
+flashear el firmware real. Agregar un campo de token al portal cautivo
+(o un comando por Serial) queda pendiente como tarea futura — no se
+implementó acá porque la restricción de esta tarea era no tocar la lógica
+del portal cautivo existente.
+
+Verificación: `pio run` dentro de `firmware/llavero/` compila limpio (0
+errores, 0 warnings) en una recompilación completa desde cero. Flash subió
+de 59.3% a 72.1% (mbedTLS/TLS), RAM subió a 13.9% — margen amplio en
+ambos. `cert_raiz.h` se verificó byte a byte contra los PEM oficiales
+descargados (diff exacto, cero diferencias) y contra `openssl x509`
+parseando ambos certificados del bloque embebido. La lógica de red real
+(conectar, negociar TLS contra el servidor real, comparar checksums en la
+práctica) no se puede probar sin hardware real conectado a internet real
+contra el servidor real — ver `firmware/llavero/README.md` para el flujo
+de prueba manual.

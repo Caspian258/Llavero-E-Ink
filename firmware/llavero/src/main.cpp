@@ -1,10 +1,13 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiMulti.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include "esp_sleep.h"
+#include "cert_raiz.h"
 
 // Pinout de la pantalla e-ink en la PCB final (D-021, no el de breadboard
 // D-001/D-017 que usa firmware/test-consumo/). Seis pines contiguos de un
@@ -33,10 +36,23 @@ constexpr const char *AP_SSID = "Llavero-Setup";
 constexpr const char *AP_PASSWORD = "";  // abierto: ver D-020
 constexpr uint32_t TIMEOUT_PORTAL_MS = 5UL * 60UL * 1000UL;  // 5 min en modo AP
 
+// ---------- Cliente HTTPS (D-008, D-009, D-023) ----------
+constexpr const char *URL_DEVICE_WAKE = "https://caspiandomain.dev/device/wake";
+constexpr uint32_t TIMEOUT_HTTP_MS = 15000;
+constexpr size_t TAMANO_BUFFER_ESPERADO = 5000;  // D-009: 200x200/8, 1bpp
+
+// Placeholder para cuando no hay token guardado en NVS todavía. Nunca es el
+// token real de producción — ese vive solo en NVS del dispositivo, jamás en
+// este código fuente que se sube a un repo público. Ver README para cómo
+// configurarlo.
+constexpr const char *TOKEN_PLACEHOLDER = "REEMPLAZAR_CON_TOKEN_REAL";
+
 // Namespace y claves de Preferences (NVS). Claves de máximo 15 caracteres.
 constexpr const char *NVS_NAMESPACE = "llavero";
 constexpr const char *NVS_CLAVE_CANTIDAD = "netCount";
 constexpr const char *NVS_CLAVE_BACKOFF = "backoffS";
+constexpr const char *NVS_CLAVE_TOKEN = "deviceToken";
+constexpr const char *NVS_CLAVE_CHECKSUM = "ultimoChecksum";
 
 Preferences prefs;
 WiFiMulti wifiMulti;
@@ -117,6 +133,133 @@ uint32_t avanzarBackoffYObtenerIntervaloActual() {
   prefs.putUInt(NVS_CLAVE_BACKOFF, siguiente);
   prefs.end();
   return actual;
+}
+
+// ---------- Cliente HTTPS ----------
+
+// Configurable sin recompilar, mismo patrón que las redes Wi-Fi (D-023):
+// vive en NVS, no en el código fuente. Si no hay token guardado todavía
+// (dispositivo recién flasheado, antes de que el usuario lo configure)
+// devuelve el placeholder — el servidor lo va a rechazar con 401, lo cual
+// es el comportamiento correcto y visible en el log, no un fallo silencioso.
+String leerTokenDispositivo() {
+  prefs.begin(NVS_NAMESPACE, true);
+  String token = prefs.getString(NVS_CLAVE_TOKEN, "");
+  prefs.end();
+  if (token.length() == 0) {
+    Serial.println(
+        "ADVERTENCIA: no hay X-Device-Token guardado en NVS. Usando "
+        "placeholder (el servidor lo va a rechazar) — configuralo, ver README.");
+    return String(TOKEN_PLACEHOLDER);
+  }
+  return token;
+}
+
+String leerUltimoChecksum() {
+  prefs.begin(NVS_NAMESPACE, true);
+  String checksum = prefs.getString(NVS_CLAVE_CHECKSUM, "");
+  prefs.end();
+  return checksum;
+}
+
+void guardarUltimoChecksum(const String &checksum) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString(NVS_CLAVE_CHECKSUM, checksum);
+  prefs.end();
+}
+
+// Consulta GET /device/wake (D-008/D-009): valida TLS contra CERT_RAIZ (sin
+// setInsecure()), manda X-Device-Token, lee X-Sleep-Seconds/X-Fw-Version/
+// X-Image-Checksum, y descarga el body completo SOLO si el checksum cambió
+// respecto al último guardado en NVS. Deja el intervalo de sueño indicado
+// por el servidor en segundosDormir (solo tiene sentido si devuelve true).
+//
+// Devuelve true únicamente si el servidor respondió 200 con los headers
+// esperados — con o sin descarga nueva, eso ya cuenta como éxito. Cualquier
+// otro caso (error de conexión/TLS, 401, 503, headers faltantes, cualquier
+// código que no sea 200) devuelve false: un fallo de servidor no se trata
+// distinto de un fallo de Wi-Fi para efectos de cuándo reintentar (D-010) —
+// quien llama debe aplicar el mismo backoff exponencial.
+bool consultarServidor(uint32_t &segundosDormir) {
+  String token = leerTokenDispositivo();
+
+  WiFiClientSecure clienteSeguro;
+  clienteSeguro.setCACert(CERT_RAIZ);
+  clienteSeguro.setTimeout(TIMEOUT_HTTP_MS / 1000);           // segundos (verificado: WiFiClientSecure::setTimeout toma segundos)
+  clienteSeguro.setHandshakeTimeout(TIMEOUT_HTTP_MS / 1000);  // ídem
+
+  HTTPClient http;
+  http.setConnectTimeout(TIMEOUT_HTTP_MS);  // ms (verificado: HTTPClient::setConnectTimeout/setTimeout toman ms)
+  http.setTimeout(TIMEOUT_HTTP_MS);
+
+  if (!http.begin(clienteSeguro, URL_DEVICE_WAKE)) {
+    Serial.println("No se pudo iniciar la conexión HTTPS (begin() falló).");
+    return false;
+  }
+
+  http.addHeader("X-Device-Token", token);
+
+  // collectHeaders() es obligatorio: sin esto, header()/hasHeader() no
+  // encuentran headers custom de la respuesta aunque estén presentes
+  // (verificado contra HTTPClient.h — la API por default no expone
+  // headers arbitrarios, hay que pedirlos explícitamente).
+  const char *encabezadosAColeccionar[] = {"X-Sleep-Seconds", "X-Fw-Version", "X-Image-Checksum"};
+  http.collectHeaders(encabezadosAColeccionar, 3);
+
+  Serial.printf("Consultando %s ...\n", URL_DEVICE_WAKE);
+  int codigo = http.GET();
+
+  if (codigo <= 0) {
+    // Códigos negativos son errores de conexión/TLS, no códigos HTTP (D-008:
+    // si la validación del certificado fallara, cae acá).
+    Serial.printf("Error de conexión HTTPS: %s (%d)\n", HTTPClient::errorToString(codigo).c_str(), codigo);
+    http.end();
+    return false;
+  }
+
+  if (codigo != HTTP_CODE_OK) {
+    Serial.printf("El servidor respondió con código %d (se esperaba 200)\n", codigo);
+    http.end();
+    return false;
+  }
+
+  if (!http.hasHeader("X-Sleep-Seconds") || !http.hasHeader("X-Image-Checksum")) {
+    Serial.println("Respuesta 200 sin los headers esperados (X-Sleep-Seconds/X-Image-Checksum).");
+    http.end();
+    return false;
+  }
+
+  segundosDormir = (uint32_t)http.header("X-Sleep-Seconds").toInt();
+  String checksumNuevo = http.header("X-Image-Checksum");
+  String versionFw = http.hasHeader("X-Fw-Version") ? http.header("X-Fw-Version") : "?";
+  Serial.printf("Respuesta OK. X-Fw-Version=%s, X-Sleep-Seconds=%u, X-Image-Checksum=%s\n", versionFw.c_str(),
+                (unsigned)segundosDormir, checksumNuevo.c_str());
+
+  String checksumAnterior = leerUltimoChecksum();
+  if (checksumNuevo.length() > 0 && checksumNuevo == checksumAnterior) {
+    Serial.println("Imagen sin cambios, no se descarga.");
+    http.end();
+    return true;
+  }
+
+  // static, no en el stack: 5000 bytes es más de la mitad del stack default
+  // de la tarea de Arduino (8 KB), y esta función ya corre en medio de un
+  // handshake TLS con su propio uso de stack — un array local de este
+  // tamaño arriesgaba overflow. En .bss no compite con la pila.
+  static uint8_t buffer[TAMANO_BUFFER_ESPERADO];
+  WiFiClient &stream = http.getStream();
+  size_t leidos = stream.readBytes(buffer, TAMANO_BUFFER_ESPERADO);
+
+  if (leidos != TAMANO_BUFFER_ESPERADO) {
+    Serial.printf("Se esperaban %u bytes y se leyeron %u — no se guarda el checksum nuevo.\n",
+                  (unsigned)TAMANO_BUFFER_ESPERADO, (unsigned)leidos);
+  } else {
+    guardarUltimoChecksum(checksumNuevo);
+    Serial.printf("Imagen nueva descargada: %u bytes, checksum %s\n", (unsigned)leidos, checksumNuevo.c_str());
+  }
+
+  http.end();
+  return true;
 }
 
 // ---------- Portal cautivo ----------
@@ -267,11 +410,21 @@ void setup() {
     uint8_t estado = wifiMulti.run(TIMEOUT_WIFI_MS);
     if (estado == WL_CONNECTED) {
       Serial.printf("Conectado a %s, IP %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-      resetearBackoff();
-      // El cliente HTTPS y el pintado de pantalla son tareas separadas
-      // (fuera del alcance de esta tarea). Por ahora, confirmar la
-      // conexión y dormir el intervalo base hasta el próximo ciclo.
-      dormir(INTERVALO_BASE_S);
+
+      // El pintado de pantalla y OTA son tareas separadas (fuera del
+      // alcance de esta tarea): por ahora el buffer descargado queda en
+      // RAM y solo se loggea. Un fallo de servidor (consultarServidor()
+      // devuelve false) NO resetea el backoff — se trata igual que un
+      // fallo de Wi-Fi (D-010).
+      uint32_t segundosDormir = INTERVALO_BASE_S;
+      if (consultarServidor(segundosDormir)) {
+        resetearBackoff();
+        dormir(segundosDormir);
+      } else {
+        Serial.println("Fallo al consultar el servidor. Aplicando backoff.");
+        uint32_t espera = avanzarBackoffYObtenerIntervaloActual();
+        dormir(espera);
+      }
       return;  // no se alcanza: el deep sleep reinicia el chip
     }
     Serial.println("No se pudo conectar a ninguna red guardada dentro del tiempo límite.");
