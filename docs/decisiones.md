@@ -318,3 +318,57 @@ Implementado en `server/app/main.py` y `server/app/config.py` (lectura de
 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`, mismo patrón de
 fail-fast que `DEVICE_AUTH_TOKEN`). No se tocó `pipeline.py` ni ningún
 archivo de `/firmware` o `/hardware`.
+
+## D-020 — Capa de conectividad Wi-Fi del firmware final: detalles menores (2026-08-01)
+
+Proyecto PlatformIO nuevo en `firmware/llavero/` (firmware final del
+dispositivo), separado de `firmware/test-consumo/` (diagnóstico de Fase 1,
+ya cerrado, no se toca). Esta tarea implementa solo `WiFiMulti` + portal
+cautivo + backoff exponencial (D-010/D-011); cliente HTTPS, pintado de
+pantalla y OTA quedan para tareas siguientes. Decisiones menores no
+cubiertas por D-010/D-011, ninguna las contradice:
+
+- **AP del portal cautivo sin contraseña.** SSID `Llavero-Setup`, abierto.
+  El riesgo de que alguien más se conecte a ese AP es bajo (ventana de 5
+  minutos, sin datos sensibles expuestos salvo el formulario para *cargar*
+  una red — no hay forma de leer las redes ya guardadas desde el portal) y
+  una password añadiría fricción justo en el flujo que existe para
+  facilitar la primera configuración.
+- **Timeout de 5 minutos en modo AP** antes de rendirse y aplicar backoff,
+  y **15 segundos por intento de `WiFiMulti.run()`** contra las redes
+  guardadas — ambos son los valores sugeridos en el planteamiento de la
+  tarea, fijados como constantes (`TIMEOUT_PORTAL_MS`, `TIMEOUT_WIFI_MS`)
+  en `src/main.cpp`.
+- **Namespace de Preferences (NVS): `llavero`.** Claves: `netCount`
+  (cantidad de redes guardadas), `ssid0..4`/`pass0..4` (hasta `MAX_REDES =
+  5`), `backoffS` (intervalo de backoff vigente en segundos). Todas dentro
+  del límite de 15 caracteres que impone NVS.
+- **Política de sobreescritura cuando ya hay 5 redes guardadas y llega una
+  SSID nueva:** se sobreescribe el índice 0 (la primera que se guardó).
+  No estaba especificado; con un dispositivo de un solo usuario, llegar a
+  5 redes simultáneas ya es un caso límite, así que cualquier política
+  simple es aceptable — se documenta para que quede claro que es
+  intencional, no un bug, si algún día parece que una red guardada
+  "desapareció".
+- **Tras guardar credenciales nuevas en el portal, el dispositivo hace
+  `ESP.restart()` en vez de intentar conectar en el mismo ciclo.** Más
+  simple y más confiable: recarga `WiFiMulti` desde cero con la lista
+  actualizada en vez de mutar su estado en caliente.
+- **Tras una conexión exitosa, el dispositivo resetea el backoff y
+  duerme el intervalo base (900 s) directo**, sin todavía llamar a un
+  cliente HTTPS ni pintar la pantalla — es el límite explícito del
+  alcance de esta tarea. La siguiente tarea (cliente HTTPS) reemplaza ese
+  `dormir(INTERVALO_BASE_S)` por el ciclo completo (descarga + pintado +
+  dormir el tiempo que indique el servidor, D-009).
+
+Pinout: se usó exactamente D-001 actualizado por D-017 (documentado en un
+comentario en `src/main.cpp`, no como constantes activas — esta tarea no
+toca el bus SPI ni la pantalla, así que declarar pines sin usar hubiera
+sido código muerto; quedan documentados en texto para que la tarea de
+pintado los use sin tener que releer `decisiones.md`).
+
+Verificación: `pio run` dentro de `firmware/llavero/` compila limpio (0
+errores, 0 warnings) en una recompilación completa desde cero. La lógica
+de Wi-Fi en sí (conectar a una red real, levantar el AP y que un celular
+se conecte) no se puede probar sin hardware — ver `firmware/llavero/README.md`
+para el flujo de prueba manual que le toca al usuario.
