@@ -595,3 +595,97 @@ parseando ambos certificados del bloque embebido. La lógica de red real
 práctica) no se puede probar sin hardware real conectado a internet real
 contra el servidor real — ver `firmware/llavero/README.md` para el flujo
 de prueba manual.
+
+## D-024 — Pintado del buffer descargado: drawImage() en vez de drawBitmap() (2026-08-02)
+
+Conecta el buffer de 5000 bytes que ya descarga `consultarServidor()`
+(D-023) con GxEPD2 para pintarlo de verdad en el panel físico. No toca la
+lógica de Wi-Fi ni HTTPS existentes — el pintado se agrega como paso
+posterior a una descarga exitosa, dentro de la misma rama donde ya se
+guarda el checksum nuevo.
+
+**`drawImage()`, no `drawBitmap()` — verificado, no asumido.** El
+planteamiento de la tarea sugería `drawBitmap()` como posibilidad a
+confirmar. Se inspeccionó el código fuente vendorizado de ambas
+librerías (el mismo GxEPD2 que ya usa `firmware/test-consumo/`, más
+Adafruit GFX Library de la que GxEPD2 hereda):
+
+- `Adafruit_GFX::drawBitmap(x, y, bitmap, w, h, color)`: recorre el
+  buffer pixel por pixel, y por cada bit en 1 llama a `writePixel(x+i, y,
+  color)` — "unset bits are transparent" (doc del propio código). Es una
+  API pensada para dibujar un bitmap con un color de primer plano elegido
+  aparte, no para pasar un framebuffer nativo ya armado; además es más
+  lenta (un `writePixel()` por cada bit encendido, en vez de una
+  transferencia directa a memoria del controlador).
+- `GxEPD2_BW::drawImage(bitmap, x, y, w, h)` llama a
+  `epd2.drawImage(...)`, que en `GxEPD2_154_D67.cpp` (mismo archivo ya
+  citado en D-018 para verificar la convención de bits) hace
+  `writeImage(...)` + `refresh(...)` + `writeImageAgain(...)`: escribe el
+  buffer tal cual a la memoria del controlador (sin pasar por
+  `writePixel()`, sin transformar nada) y dispara un refresco completo,
+  todo en un solo llamado.
+
+Como D-018 ya fijó el formato del buffer para que coincida exactamente
+con la convención nativa del controlador (1=blanco, 0=negro, MSB-first,
+row-major — la misma que usa `writeImage()`/`fillScreen()` internamente),
+`drawImage()` es la opción directa y correcta: nada que reinterpretar,
+ningún parámetro de color fg/bg que elegir para que cuadre. Se usa
+`display.drawImage(buffer, 0, 0, 200, 200)` — refresco completo, no
+parcial, en una sola llamada.
+
+**Dónde se llama.** Dentro de `consultarServidor()` (D-023), en la misma
+rama donde ya se verificaba `leidos == TAMANO_BUFFER_ESPERADO` antes de
+guardar el checksum nuevo — no se agregó una condición nueva, se
+reutilizó la que ya existía. Esto garantiza por construcción que nunca se
+pinta con un buffer parcial/corrupto (tamaño distinto al esperado) ni
+cuando el checksum no cambió (esa rama ni siquiera llega a leer el body,
+ver D-023): pintar y guardar el checksum están atados a la misma
+condición de éxito.
+
+**Orden: pintar antes de guardar el checksum, no después.** Si
+`pintarPantalla()` fallara o el dispositivo se reseteara a mitad de
+pintar, guardar el checksum ANTES habría dejado al dispositivo pensando
+que ya pintó una imagen que en realidad no llegó a mostrarse — se
+quedaría sin la imagen correcta hasta que llegara una nueva desde
+Telegram. Pintando primero y guardando el checksum después, un fallo a
+mitad de camino simplemente hace que el próximo ciclo reintente la
+descarga y el pintado completos.
+
+**`display.hibernate()` sin condicionales de por medio.** `pintarPantalla()`
+es una secuencia lineal (`SPI.begin` → `display.init` → `setRotation` →
+`setFullWindow` → `drawImage` → `hibernate`), sin ninguna rama entre
+`drawImage()` y `hibernate()` que pueda saltárselo — la única forma de
+que no se llame es que `drawImage()` mismo cuelgue el firmware (ej. fallo
+de hardware real en la señal BUSY), que está fuera de lo que el software
+puede garantizar. Es la misma condición crítica de D-006: sin hibernar el
+panel antes del deep sleep, la corriente parásita del módulo domina el
+consumo.
+
+**Pinout: confirmado línea por línea contra D-021 antes de escribir los
+`#define`/`constexpr`** (no se tocaron los valores, ya estaban fijados
+desde la tarea de D-021/D-023 sin usarse todavía):
+
+| Señal | D-021 | `main.cpp` |
+|---|---|---|
+| BUSY | D1/GPIO3 | `PIN_BUSY = 3` |
+| RST | D2/GPIO4 | `PIN_RST = 4` |
+| DC | D3/GPIO5 | `PIN_DC = 5` |
+| CS | D4/GPIO6 | `PIN_CS = 6` |
+| CLK | D5/GPIO7 | `PIN_CLK = 7` |
+| DIN | D6/GPIO21 | `PIN_DIN = 21` |
+
+Sin residuos del pinout de breadboard (D-001/D-017, `firmware/test-consumo/`)
+— se confirmó con una búsqueda explícita en el archivo.
+
+**`lib_deps` de `firmware/llavero/platformio.ini`:** `zinggjm/GxEPD2@^1.5.9`,
+mismo pin de versión que `firmware/test-consumo/platformio.ini` — no se
+reinventa el patrón, se reutiliza la librería ya validada en D-006.
+
+Verificación: `pio run` compila limpio (0 errores, 0 warnings) en una
+recompilación completa desde cero. Flash subió de 72.1% a 73.2%, RAM de
+13.9% a 15.5% — margen amplio en ambos. El pintado real (que la imagen
+aparezca correctamente en el panel físico, que `hibernate()` de verdad
+mantenga el consumo bajo con el flujo completo de red) no se puede
+probar sin hardware real: XIAO ESP32C3 + panel Waveshare 1.54" reales,
+conectados a internet real, contra el servidor real — ver
+`firmware/llavero/README.md` para el flujo de prueba manual.

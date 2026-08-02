@@ -6,16 +6,14 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <GxEPD2_BW.h>
 #include "esp_sleep.h"
 #include "cert_raiz.h"
 
 // Pinout de la pantalla e-ink en la PCB final (D-021, no el de breadboard
 // D-001/D-017 que usa firmware/test-consumo/). Seis pines contiguos de un
 // solo lado del conector del XIAO para simplificar el trazado de la PCB.
-// Reservado para la tarea de pintado/HTTPS que sigue después de esta —
-// esta tarea solo implementa la capa de conectividad Wi-Fi, no toca el
-// bus SPI ni la pantalla, pero los valores quedan fijados ya como
-// constantes para que esa tarea no tenga que releer decisiones.md.
+// Confirmado línea por línea contra la tabla de D-021 antes de fijarlo acá.
 constexpr uint8_t PIN_BUSY = 3;   // D1
 constexpr uint8_t PIN_RST = 4;    // D2
 constexpr uint8_t PIN_DC = 5;     // D3
@@ -39,6 +37,8 @@ constexpr uint32_t TIMEOUT_PORTAL_MS = 5UL * 60UL * 1000UL;  // 5 min en modo AP
 // ---------- Cliente HTTPS (D-008, D-009, D-023) ----------
 constexpr const char *URL_DEVICE_WAKE = "https://caspiandomain.dev/device/wake";
 constexpr uint32_t TIMEOUT_HTTP_MS = 15000;
+constexpr uint16_t ANCHO_PANTALLA = 200;
+constexpr uint16_t ALTO_PANTALLA = 200;
 constexpr size_t TAMANO_BUFFER_ESPERADO = 5000;  // D-009: 200x200/8, 1bpp
 
 // Placeholder para cuando no hay token guardado en NVS todavía. Nunca es el
@@ -58,6 +58,7 @@ Preferences prefs;
 WiFiMulti wifiMulti;
 DNSServer dnsServer;
 WebServer webServer(80);
+GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(PIN_CS, PIN_DC, PIN_RST, PIN_BUSY));
 
 bool credencialesRecibidas = false;
 
@@ -168,6 +169,34 @@ void guardarUltimoChecksum(const String &checksum) {
   prefs.end();
 }
 
+// ---------- Pintado de pantalla (D-018, D-021, D-024) ----------
+
+// Pinta el buffer de 200x200 1bpp descargado (D-009), con un refresco
+// completo (no parcial). El buffer ya viene en la convención nativa del
+// controlador (1=blanco, 0=negro, MSB-first, row-major — D-018, verificada
+// en esa tarea contra el código fuente de GxEPD2), así que se pasa directo
+// a display.drawImage() en vez de Adafruit_GFX::drawBitmap(): esa última
+// tiene otra convención (bit=1 dibuja un color foreground pixel por pixel
+// vía writePixel(), pensada para bitmaps con fg/bg separados, no para un
+// framebuffer nativo ya armado) y es más lenta al no escribir directo a la
+// memoria del controlador. Confirmado leyendo
+// GxEPD2_154_D67::drawImage() en el código fuente vendorizado (mismo que
+// usa firmware/test-consumo/): hace writeImage() + refresh() +
+// writeImageAgain() — un refresco completo en un solo llamado.
+//
+// display.hibernate() se llama siempre al final, sin condicionales de por
+// medio: es la misma condición crítica de presupuesto de energía validada
+// en D-006 (sin hibernar el panel antes del deep sleep, la corriente
+// parásita del módulo domina el consumo).
+void pintarPantalla(const uint8_t *buffer) {
+  SPI.begin(PIN_CLK, -1, PIN_DIN, PIN_CS);  // SPI por hardware con pines custom (D-021, no son los nativos del C3)
+  display.init(115200);
+  display.setRotation(0);
+  display.setFullWindow();
+  display.drawImage(buffer, 0, 0, ANCHO_PANTALLA, ALTO_PANTALLA);
+  display.hibernate();
+}
+
 // Consulta GET /device/wake (D-008/D-009): valida TLS contra CERT_RAIZ (sin
 // setInsecure()), manda X-Device-Token, lee X-Sleep-Seconds/X-Fw-Version/
 // X-Image-Checksum, y descarga el body completo SOLO si el checksum cambió
@@ -251,11 +280,12 @@ bool consultarServidor(uint32_t &segundosDormir) {
   size_t leidos = stream.readBytes(buffer, TAMANO_BUFFER_ESPERADO);
 
   if (leidos != TAMANO_BUFFER_ESPERADO) {
-    Serial.printf("Se esperaban %u bytes y se leyeron %u — no se guarda el checksum nuevo.\n",
+    Serial.printf("Se esperaban %u bytes y se leyeron %u — no se guarda el checksum nuevo ni se pinta.\n",
                   (unsigned)TAMANO_BUFFER_ESPERADO, (unsigned)leidos);
   } else {
-    guardarUltimoChecksum(checksumNuevo);
     Serial.printf("Imagen nueva descargada: %u bytes, checksum %s\n", (unsigned)leidos, checksumNuevo.c_str());
+    pintarPantalla(buffer);
+    guardarUltimoChecksum(checksumNuevo);
   }
 
   http.end();

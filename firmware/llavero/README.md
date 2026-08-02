@@ -5,12 +5,13 @@ Proyecto PlatformIO del firmware final del dispositivo, separado de
 
 **Qué incluye hasta ahora:** conectividad Wi-Fi (`WiFiMulti`, redes
 guardadas en NVS, portal cautivo como fallback, backoff exponencial —
-D-010, D-011, D-020) y, desde D-023, un cliente HTTPS que consulta
+D-010, D-011, D-020), un cliente HTTPS que consulta
 `GET https://caspiandomain.dev/device/wake` (D-008/D-009) tras conectar,
 valida el certificado TLS real (sin `setInsecure()`), y descarga el buffer
-de imagen solo si el checksum cambió. Todavía **no** hay pintado de
-pantalla ni OTA — el buffer descargado queda en RAM, solo se loggea su
-tamaño y checksum; son tareas separadas que vienen después.
+de imagen solo si el checksum cambió (D-023) y, desde D-024, el pintado
+real de ese buffer en el panel e-ink con GxEPD2 — solo cuando la imagen es
+nueva, seguido siempre de `display.hibernate()` antes de dormir. Todavía
+**no** hay OTA — tarea separada que viene después.
 
 ## Compilar
 
@@ -55,16 +56,21 @@ antes de reintentar.
    `GET /device/wake` (D-023) con el `X-Device-Token` guardado en NVS,
    validando TLS contra `cert_raiz.h`.
    - **Si el servidor responde 200:** compara `X-Image-Checksum` contra
-     el último guardado en NVS. Si es igual, no descarga el body. Si es
+     el último guardado en NVS. Si es igual, no descarga el body ni pinta
+     nada — evita desgastar el panel con refrescos innecesarios. Si es
      distinto (o no había ninguno guardado), descarga los 5000 bytes a un
-     buffer en RAM, loggea tamaño y checksum, y guarda el checksum nuevo.
-     En ambos casos resetea el backoff a 900 s y duerme los segundos que
-     indicó el servidor en `X-Sleep-Seconds` (D-005/D-009 — el servidor
-     controla el horario real, no un intervalo fijo del firmware).
+     buffer en RAM, **pinta el panel con `GxEPD2` (D-024, refresco
+     completo) e hiberna la pantalla**, y recién después guarda el
+     checksum nuevo (en ese orden — si algo falla a mitad del pintado, el
+     checksum no se guarda y el próximo ciclo reintenta descarga + pintado
+     completos). En ambos casos resetea el backoff a 900 s y duerme los
+     segundos que indicó el servidor en `X-Sleep-Seconds` (D-005/D-009 —
+     el servidor controla el horario real, no un intervalo fijo del
+     firmware).
    - **Si falla** (error de conexión/TLS, 401, 503, o cualquier código
      que no sea 200): no resetea el backoff, se trata igual que un fallo
      de Wi-Fi — aplica backoff exponencial y duerme ese intervalo.
-   - Pintado de pantalla y OTA quedan para tareas posteriores.
+   - OTA queda para una tarea posterior.
 4. **Si no hay redes guardadas, o si `WiFiMulti` no logra conectar:**
    levanta el portal cautivo — AP `Llavero-Setup` (abierto) + página de
    configuración en `192.168.4.1`, durante hasta 5 minutos.
@@ -175,14 +181,15 @@ nuevo intento).
   actualizar la password existente en su índice, no crear una entrada
   duplicada (log: "Red existente actualizada").
 
-## Prueba manual del cliente HTTPS (requiere hardware real + internet + servidor real)
+## Prueba manual del cliente HTTPS y el pintado (requiere hardware real + internet + servidor real + panel real)
 
-**No hay forma de verificar esto sin un XIAO ESP32C3 real, conectado a
-una red con internet de verdad, contra el servidor real en
+**No hay forma de verificar esto sin un XIAO ESP32C3 real, con el panel
+Waveshare 1.54" real conectado con el pinout de D-021, conectado a una red
+con internet de verdad, contra el servidor real en
 `https://caspiandomain.dev`** — la negociación TLS contra el certificado
-real, la respuesta real del servidor y la comparación de checksum en la
-práctica no se pueden simular ni mockear de forma útil. Lo que sigue es
-el flujo que le toca al usuario.
+real, la respuesta real del servidor, la comparación de checksum, y que
+la imagen realmente aparezca en el panel físico, no se pueden simular ni
+mockear de forma útil. Lo que sigue es el flujo que le toca al usuario.
 
 ### 1. Configurar el token real (`X-Device-Token`)
 
@@ -222,7 +229,7 @@ el token en NVS, y después volver a flashear el firmware real:
 Este token es el mismo que ya generaste para `server/.env`
 (`DEVICE_AUTH_TOKEN` en el VPS, D-022) — tienen que coincidir.
 
-### 2. Escenario: imagen nueva
+### 2. Escenario: imagen nueva (descarga Y pinta)
 
 Con una imagen real cargada en el servidor (vía el bot de Telegram) que
 todavía no se descargó nunca en este dispositivo:
@@ -236,9 +243,13 @@ Durmiendo <N> segundos
 ```
 
 `<N>` (los segundos de sueño) los decide el servidor (D-005) — no tiene
-por qué ser 900.
+por qué ser 900. **Confirmación visual:** el panel debe mostrar la imagen
+o texto real mandado por Telegram — este es el único escenario donde el
+panel cambia. El refresco completo del panel (parpadeo blanco/negro
+varias veces) tarda unos segundos; el log de "Durmiendo" recién aparece
+después de que `display.hibernate()` termina.
 
-### 3. Escenario: imagen sin cambios
+### 3. Escenario: imagen sin cambios (NO pinta)
 
 Repitiendo el ciclo (o forzando un arranque manual) sin haber mandado una
 imagen nueva por Telegram desde la última vez:
@@ -253,7 +264,9 @@ Durmiendo <N> segundos
 
 Mismo checksum que la vez anterior — confirma que la comparación contra
 NVS funciona y que no se gasta batería/tiempo bajando los 5000 bytes de
-nuevo.
+nuevo. **Confirmación visual:** el panel NO debe parpadear ni cambiar —
+si refresca igual, algo está mal en la condición que gatea `pintarPantalla()`
+(D-024).
 
 ### 4. Escenario: token incorrecto
 
