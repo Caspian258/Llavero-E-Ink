@@ -121,21 +121,58 @@ uint32_t avanzarBackoffYObtenerIntervaloActual() {
 
 // ---------- Portal cautivo ----------
 
-String paginaConfiguracion() {
+// CSS inline compartido por las tres páginas (formulario, confirmación,
+// error) — mobile-first, sin dependencias externas (el AP no tiene
+// internet). font-size:16px en los inputs evita el zoom automático que
+// hace iOS Safari al enfocar un campo con letra más chica.
+constexpr const char *ESTILO_BASE =
+    "body{margin:0;padding:32px 16px;background:#f2f4f7;"
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
+    "color:#1c1e26;}"
+    ".tarjeta{max-width:380px;margin:0 auto;background:#fff;border-radius:16px;"
+    "padding:28px 24px;box-shadow:0 4px 20px rgba(20,20,40,0.08);}"
+    "h1{font-size:1.35rem;margin:0 0 4px;}"
+    ".subtitulo{font-size:0.9rem;color:#6a6f7a;margin:0 0 18px;}"
+    "p{line-height:1.5;margin:0 0 20px;}"
+    "label{display:block;font-size:0.85rem;font-weight:600;margin:0 0 6px;color:#3a3d46;}"
+    "input{display:block;width:100%;box-sizing:border-box;padding:12px 14px;"
+    "margin:0 0 18px;border:1px solid #d8dbe2;border-radius:10px;font-size:16px;}"
+    "input:focus{outline:none;border-color:#5468ff;}"
+    "button{width:100%;padding:14px;border:none;border-radius:10px;"
+    "background:#5468ff;color:#fff;font-size:1rem;font-weight:600;}"
+    "button:active{background:#3f52d9;}"
+    ".chip{display:inline-block;background:#eaedff;color:#4351b8;padding:2px 10px;"
+    "border-radius:999px;font-size:0.8rem;font-weight:600;}";
+
+// Envuelve cualquier fragmento de HTML en la página base (doctype, viewport,
+// estilo). Las tres respuestas del portal (formulario, guardado, error) lo
+// usan para verse consistentes sin repetir el bloque de estilo tres veces.
+String envolverPagina(const String &cuerpo) {
   String html;
   html += "<!DOCTYPE html><html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>Llavero E-Ink</title></head><body>";
-  html += "<h1>Llavero E-Ink</h1>";
-  html += "<p>Conectado a la red de configuración: <b>" + String(AP_SSID) + "</b></p>";
-  html += "<p>Ingresa el nombre y la contraseña de la red Wi-Fi a la que el ";
-  html += "llavero debe conectarse para descargar la imagen del día:</p>";
-  html += "<form method='POST' action='/guardar'>";
-  html += "<label>SSID:<br><input type='text' name='ssid' maxlength='32' required></label><br><br>";
-  html += "<label>Password:<br><input type='password' name='pass' maxlength='64'></label><br><br>";
-  html += "<button type='submit'>Guardar y reiniciar</button>";
-  html += "</form></body></html>";
+  html += "<title>Llavero E-Ink</title><style>";
+  html += ESTILO_BASE;
+  html += "</style></head><body><div class='tarjeta'>";
+  html += cuerpo;
+  html += "</div></body></html>";
   return html;
+}
+
+String paginaConfiguracion() {
+  String cuerpo;
+  cuerpo += "<h1>Llavero E-Ink</h1>";
+  cuerpo += "<p class='subtitulo'>Conectado a <span class='chip'>" + String(AP_SSID) + "</span></p>";
+  cuerpo += "<p>Ingresa el nombre y la contraseña de la red Wi-Fi a la que el ";
+  cuerpo += "llavero debe conectarse para descargar la imagen del día:</p>";
+  cuerpo += "<form method='POST' action='/guardar'>";
+  cuerpo += "<label for='ssid'>Red (SSID)</label>";
+  cuerpo += "<input id='ssid' type='text' name='ssid' maxlength='32' autocapitalize='off' autocorrect='off' required>";
+  cuerpo += "<label for='pass'>Contraseña</label>";
+  cuerpo += "<input id='pass' type='password' name='pass' maxlength='64'>";
+  cuerpo += "<button type='submit'>Guardar y reiniciar</button>";
+  cuerpo += "</form>";
+  return envolverPagina(cuerpo);
 }
 
 void manejarRaiz() {
@@ -144,26 +181,16 @@ void manejarRaiz() {
 
 void manejarGuardar() {
   if (!webServer.hasArg("ssid") || webServer.arg("ssid").length() == 0) {
-    webServer.send(400, "text/plain; charset=utf-8", "Falta el SSID.");
+    webServer.send(400, "text/html; charset=utf-8",
+                    envolverPagina("<h1>Falta el SSID</h1><p>Volvé atrás e ingresá el nombre de la red.</p>"));
     return;
   }
   String ssid = webServer.arg("ssid");
   String pass = webServer.hasArg("pass") ? webServer.arg("pass") : "";
   guardarRedNueva(ssid, pass);
   credencialesRecibidas = true;
-  webServer.send(
-      200, "text/html; charset=utf-8",
-      "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
-      "<p>Guardado. El llavero se reiniciará para conectarse.</p>"
-      "</body></html>");
-}
-
-void manejarNoEncontrado() {
-  // Redirige cualquier ruta desconocida a la raíz: fuerza el comportamiento
-  // de "captive portal" en el celular (que suele probar una URL de prueba
-  // propia antes de mostrar la página).
-  webServer.sendHeader("Location", "http://192.168.4.1/", true);
-  webServer.send(302, "text/plain", "");
+  webServer.send(200, "text/html; charset=utf-8",
+                  envolverPagina("<h1>Guardado</h1><p>El llavero se reiniciará para conectarse a la red nueva.</p>"));
 }
 
 // Levanta AP + portal cautivo. Devuelve true si recibió credenciales nuevas
@@ -177,7 +204,21 @@ bool correrPortalCautivo(uint32_t timeoutMs) {
   dnsServer.start(53, "*", ip);
   webServer.on("/", HTTP_GET, manejarRaiz);
   webServer.on("/guardar", HTTP_POST, manejarGuardar);
-  webServer.onNotFound(manejarNoEncontrado);
+  // Cualquier ruta no reconocida sirve la misma página del formulario
+  // directo con 200, en vez de redirigir con 302. Las rutas de sondeo de
+  // portal cautivo cambian por OS y con el tiempo (iOS: hotspot-detect.html
+  // /library/test/success.html en captive.apple.com; Android/Chrome:
+  // generate_204 en connectivitycheck.gstatic.com y clients3.google.com;
+  // Windows: connecttest.txt/ncsi.txt en msftconnecttest.com/msftncsi.com;
+  // Firefox: canonical.html en detectportal.firefox.com) — en vez de
+  // mantener esa lista al día, onNotFound responde igual a cualquier ruta.
+  // Servir el contenido real en vez de un 302 es más robusto: iOS en
+  // particular no siempre sigue la redirección durante su sondeo
+  // automático, mientras que responder directo con contenido (no el
+  // "Success"/204/texto exacto que cada OS espera si hay internet) es lo
+  // que dispara el aviso de "iniciar sesión en la red" en los tres.
+  // Pendiente de confirmar con celular real, ver README.
+  webServer.onNotFound(manejarRaiz);
   webServer.begin();
 
   credencialesRecibidas = false;

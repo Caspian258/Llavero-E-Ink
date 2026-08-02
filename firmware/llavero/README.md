@@ -96,14 +96,26 @@ Portal cautivo activo. SSID: Llavero-Setup | IP: 192.168.4.1
 1. En el celular, ir a Wi-Fi y conectarse a la red **Llavero-Setup** (sin
    contraseña).
 2. El celular debería abrir solo una página de "iniciar sesión en la red"
-   (comportamiento estándar de captive portal). Si no aparece sola, abrir
-   un navegador y entrar a `http://192.168.4.1/`.
-3. Debe verse una página simple confirmando **"Conectado a la red de
-   configuración: Llavero-Setup"** — esa es la confirmación visual de que
-   el celular está hablando con el dispositivo correcto.
+   (comportamiento estándar de captive portal), **sin que haga falta abrir
+   un navegador ni escribir la IP a mano**. Si no aparece sola, entrar
+   manualmente a `http://192.168.4.1/` como respaldo.
+3. Debe verse la tarjeta de configuración con el chip **"Llavero-Setup"**
+   — esa es la confirmación visual de que el celular está hablando con el
+   dispositivo correcto.
 4. Llenar el formulario con el SSID y password de la red real (ej. el
    hotspot del celular) y tocar "Guardar y reiniciar".
-5. Debe verse "Guardado. El llavero se reiniciará para conectarse."
+5. Debe verse "Guardado. El llavero se reiniciará para conectarse a la
+   red nueva."
+
+**Pendiente de confirmar con hardware real:** `onNotFound` ahora sirve la
+página de configuración directo (200) para cualquier ruta no reconocida,
+en vez de redirigir con 302 — la razón documentada en el código es que el
+sondeo automático de iOS no siempre sigue redirecciones. Esto **no se
+puede verificar sin un celular real** conectándose al AP; probarlo
+específicamente en iOS/Safari (que es donde se detectó el problema
+original) y también en Android, y confirmar si el popup automático
+aparece esta vez. Si en algún dispositivo sigue sin aparecer solo, el
+paso 2 de arriba ya cubre el respaldo manual (`http://192.168.4.1/`).
 
 En el monitor serie, en paralelo, debe verse:
 
