@@ -10,11 +10,23 @@
 | Interruptor deslizable, carcasa impresa, argolla | Por definir en Fase 1 |
 | Cautín, multímetro, impresora 3D | Disponibles |
 
-## Pinout (validado y discutido — actualizado 2026-07-28)
+## Pinout — DOS pinouts activos, para dos placas distintas
 
-**Batería → XIAO (pads traseros):** Rojo a `BAT+` / `B+`, Negro a `BAT-` / `B-`.
+**Importante:** a partir de D-021 (2026-08-01) hay dos pinouts vigentes al
+mismo tiempo, para dos hardware distintos. No son inconsistentes entre sí
+por error — cada uno le corresponde a una placa y un firmware distintos:
 
-**Pantalla → XIAO (pines frontales):**
+| | Pinout de breadboard / diagnóstico | Pinout de PCB final |
+|---|---|---|
+| Decisiones | D-001, actualizado por D-017 | D-021 |
+| Firmware | `firmware/test-consumo/` (cerrado, no se toca) | `firmware/llavero/` (firmware final) |
+| Hardware | Protoboard, cableado a mano | PCB fabricada en la escuela |
+| Por qué así | RST/BUSY/DC agrupados del lado izquierdo, DIN/CLK/CS del derecho — 3 y 3, para facilitar el cableado manual | 6 pines contiguos de un solo lado del conector — para que el trazado de la PCB sea directo |
+
+**Batería → XIAO (pads traseros, igual en ambos):** Rojo a `BAT+` / `B+`,
+Negro a `BAT-` / `B-`.
+
+### Pinout de breadboard / diagnóstico (D-001 + D-017)
 
 | Pantalla | XIAO | GPIO | Nota |
 |---|---|---|---|
@@ -30,7 +42,28 @@
 Pinout corregido el 2026-07-28 tras validar el mapeo D→GPIO real del XIAO
 ESP32C3 contra la documentación de Seeed; ver docs/decisiones.md D-001.
 DC reubicado de D7/GPIO20 a D1/GPIO3 el 2026-08-01 para balancear el
-conector en 3 pines por lado; ver docs/decisiones.md D-017.
+conector en 3 pines por lado; ver docs/decisiones.md D-017. Este pinout
+quedó cerrado junto con la medición de consumo de D-006 y no se vuelve a
+tocar.
+
+### Pinout de PCB final (D-021)
+
+| Pantalla | XIAO | GPIO | Nota |
+|---|---|---|---|
+| VCC | 3V3 | — | Salida del regulador interno |
+| GND | GND | — | |
+| BUSY | D1 | GPIO3 | Entrada |
+| RST | D2 | GPIO4 | |
+| DC | D3 | GPIO5 | |
+| CS | D4 | GPIO6 | |
+| CLK | D5 | GPIO7 | |
+| DIN | D6 | GPIO21 | UART0 TX (U0TXD) del SoC — no es strapping pin, y `Serial` en este XIAO usa USB-CDC nativo, no UART0; ver docs/decisiones.md D-021 |
+
+Los seis pines quedan contiguos (D1 a D6) de un solo lado del conector del
+XIAO, a propósito, para simplificar el trazado de la PCB. Esto reintroduce
+GPIO21 (D6), que D-001 había evitado por ser U0TXD — D-021 documenta por
+qué en esta placa es un riesgo aceptable. Vigente para
+`firmware/llavero/`, el firmware final que corre en la PCB.
 
 ## Decisiones ya tomadas
 

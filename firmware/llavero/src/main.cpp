@@ -6,13 +6,19 @@
 #include <Preferences.h>
 #include "esp_sleep.h"
 
-// Pinout de la pantalla e-ink (D-001, actualizado por D-017) — reservado
-// para la tarea de pintado/HTTPS que sigue después de esta. Esta tarea
-// solo implementa la capa de conectividad Wi-Fi; no toca el bus SPI ni la
-// pantalla. Se documenta aquí para que la siguiente tarea use los valores
-// correctos sin tener que releer decisiones.md:
-//   DIN=D5/GPIO7 · CLK=D4/GPIO6 · CS=D10/GPIO10 · DC=D1/GPIO3 (D-017)
-//   RST=D3/GPIO5 (RTC GPIO) · BUSY=D2/GPIO4 (RTC GPIO)
+// Pinout de la pantalla e-ink en la PCB final (D-021, no el de breadboard
+// D-001/D-017 que usa firmware/test-consumo/). Seis pines contiguos de un
+// solo lado del conector del XIAO para simplificar el trazado de la PCB.
+// Reservado para la tarea de pintado/HTTPS que sigue después de esta —
+// esta tarea solo implementa la capa de conectividad Wi-Fi, no toca el
+// bus SPI ni la pantalla, pero los valores quedan fijados ya como
+// constantes para que esa tarea no tenga que releer decisiones.md.
+constexpr uint8_t PIN_BUSY = 3;   // D1
+constexpr uint8_t PIN_RST = 4;    // D2
+constexpr uint8_t PIN_DC = 5;     // D3
+constexpr uint8_t PIN_CS = 6;     // D4
+constexpr uint8_t PIN_CLK = 7;    // D5
+constexpr uint8_t PIN_DIN = 21;   // D6 — U0TXD, no es strapping pin (D-021)
 
 // ---------- Backoff exponencial (D-010) ----------
 constexpr uint32_t INTERVALO_BASE_S = 900;     // 15 min

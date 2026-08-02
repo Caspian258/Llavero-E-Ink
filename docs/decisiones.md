@@ -372,3 +372,80 @@ errores, 0 warnings) en una recompilación completa desde cero. La lógica
 de Wi-Fi en sí (conectar a una red real, levantar el AP y que un celular
 se conecte) no se puede probar sin hardware — ver `firmware/llavero/README.md`
 para el flujo de prueba manual que le toca al usuario.
+
+## D-021 — Pinout de PCB final: seis pines contiguos, reintroduce GPIO21 (2026-08-01)
+
+El usuario va a fabricar una PCB en la máquina de su escuela. Para que el
+layout use 6 pines contiguos de un solo lado del conector del XIAO
+ESP32C3 (en vez del agrupamiento 3-y-3 de D-017, pensado para facilitar
+cableado a mano en breadboard, no trazado de PCB), se fija un pinout
+nuevo, distinto y paralelo al de D-001/D-017:
+
+```
+BUSY = D1 / GPIO3
+RST  = D2 / GPIO4
+DC   = D3 / GPIO5
+CS   = D4 / GPIO6
+CLK  = D5 / GPIO7
+DIN  = D6 / GPIO21
+VCC  -> 3V3, GND -> GND (sin cambio)
+```
+
+**Esto no reemplaza D-001/D-017.** Ese pinout sigue vigente, cerrado, y
+sin tocar en `firmware/test-consumo/` (ligado a la medición de consumo de
+D-006). D-021 aplica únicamente a `firmware/llavero/` (firmware final) y
+a la PCB que se fabrique. `00-contexto-tecnico.md` documenta los dos
+pinouts por separado, con una nota explícita de que la diferencia es
+intencional, no un error de sincronización entre archivos.
+
+**La disyuntiva real: GPIO2 (strapping) vs. GPIO21 (UART0 TX).** Encajar
+6 señales en pines contiguos del XIAO fuerza a elegir entre D0/GPIO2 (para
+completar el rango D1-D6 por el otro extremo) o D6/GPIO21 (para completar
+el rango D1-D6 tal como se pidió). D-001 ya había evitado ambos por
+motivos distintos: GPIO2 por ser strapping pin, GPIO21 por ser U0TXD usado
+por el bootloader ROM. Entre los dos, se elige GPIO21 porque el riesgo es
+categóricamente menor:
+
+- **GPIO2 (strapping) controla el modo de arranque del chip.** Según la
+  referencia de GPIO del ESP-IDF para ESP32-C3 (verificado ahora,
+  <https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/peripherals/gpio.html>):
+  *"Strapping pin: GPIO2, GPIO8 and GPIO9 are strapping pins."* Confirmado
+  además contra la página de esptool sobre selección de modo de arranque
+  (<https://docs.espressif.com/projects/esptool/en/latest/esp32c3/advanced-topics/boot-mode-selection.html>),
+  que documenta cómo GPIO8/GPIO9 determinan si el chip entra en modo de
+  descarga serie. Un periférico externo cargando esa línea en el momento
+  del reset puede, en el peor caso, dejar el chip entrando siempre en modo
+  de descarga y parecer "brickeado" sin un análisis cuidadoso. **GPIO21 no
+  aparece en ninguna de las dos páginas como strapping pin** — no participa
+  en la selección de modo de arranque en absoluto.
+- **GPIO21 es U0TXD, pero el XIAO ESP32C3 no usa UART0 para `Serial`.**
+  Verificado contra la definición de la placa que usa PlatformIO
+  (`~/.platformio/platforms/espressif32/boards/seeed_xiao_esp32c3.json`),
+  que fija `-DARDUINO_USB_MODE=1` y `-DARDUINO_USB_CDC_ON_BOOT=1`. Siguiendo
+  esas macros hasta el núcleo arduino-esp32 instalado
+  (`cores/esp32/HardwareSerial.h` y `cores/esp32/HWCDC.h`): con
+  `ARDUINO_USB_CDC_ON_BOOT=1`, el objeto UART0 clásico se renombra a
+  `Serial0` (no `Serial`), y `Serial` pasa a ser una instancia de `HWCDC`
+  — el periférico USB Serial/JTAG nativo del ESP32-C3, un bus físicamente
+  distinto de UART0/GPIO20-21. Esto es justamente lo que ya se documentó
+  como ventaja del XIAO ESP32C3 (sin chip USB-serie aparte, como CH340 o
+  CP2102): programación y consola serie van por el USB nativo del SoC, no
+  por GPIO20/21. En consecuencia, el logging por `Serial` que pide esta
+  tarea y el monitor serie de PlatformIO **no comparten bus con GPIO21** —
+  UART0 queda sin usar por completo en este firmware. El único riesgo real
+  que queda es que el bootloader ROM (antes de que arranque el firmware de
+  Arduino) puede escribir bytes de diagnóstico en U0TXD durante el arranque
+  más temprano; como DIN es una entrada del panel e-ink que solo se
+  interpreta cuando CS está activo y CLK conmuta, ese tráfico espurio no
+  llega a latchearse como datos SPI reales.
+
+**Pinout aplicado** en `firmware/llavero/src/main.cpp` (constantes
+`PIN_BUSY`, `PIN_RST`, `PIN_DC`, `PIN_CS`, `PIN_CLK`, `PIN_DIN`) y en la
+tabla nueva de `00-contexto-tecnico.md`. La lógica de Wi-Fi de la tarea
+anterior (D-020) no se tocó — solo cambiaron los valores de pines, que
+además siguen sin usarse todavía en este firmware (la tarea de
+pintado/HTTPS es la que los va a consumir).
+
+Verificación: `pio run` dentro de `firmware/llavero/` compila limpio (0
+errores, 0 warnings) en una recompilación completa desde cero con los
+pines nuevos. `firmware/test-consumo/` no se tocó.
