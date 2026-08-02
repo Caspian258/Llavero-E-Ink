@@ -24,6 +24,24 @@ pio run --target upload
 pio device monitor --baud 115200
 ```
 
+**Nota sobre `board_upload.after_reset = watchdog_reset` en `platformio.ini`:**
+el reset por default tras flashear (`hard_reset`) en el XIAO ESP32C3 usa el
+USB-Serial/JTAG nativo del chip, que solo dispara un *core reset* — no
+vuelve a muestrear los pines de strapping de arranque. Si en algún momento
+quedaron muestreados como "modo descarga", el chip se queda atascado ahí
+indefinidamente después de cada upload, sin llegar nunca a correr el
+firmware (ni un botón de reset físico ni desconectar el USB lo saca,
+porque ninguno de los dos fuerza un reset de sistema completo por esta
+vía). `watchdog_reset` sí hace un reset de sistema completo, que vuelve a
+muestrear los pines y arranca la aplicación normalmente.
+
+Como consecuencia, el reset de sistema completo también reinicia el propio
+periférico USB nativo, así que **el puerto serie puede reenumerar con un
+nombre distinto después de cada upload** (por ejemplo, de `/dev/ttyACM0` a
+`/dev/ttyACM1`). Si `pio device monitor` no conecta o se queda colgado
+después de un upload, verificar el puerto actual con `ls /dev/ttyACM*`
+antes de reintentar.
+
 ## Qué hace cada ciclo de arranque
 
 1. Carga las redes guardadas en NVS (`Preferences`, namespace `llavero`)
