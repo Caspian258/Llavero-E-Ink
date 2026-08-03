@@ -939,3 +939,57 @@ recompilación completa desde cero. Servidor probado con `curl` real
 OTA completo (descarga real, rollback real ante un firmware roto,
 arranque real con el firmware nuevo) no se puede probar sin hardware
 real — ver `firmware/llavero/README.md` para el flujo de prueba manual.
+
+## D-028 — Primera prueba real de OTA con hardware físico: éxito, y HTTPUpdate no reinicia solo (2026-08-03)
+
+Primera verificación con hardware real del ciclo OTA completo diseñado en
+D-012 e implementado en D-027 (`0.1.0` → `0.1.1`, ver
+`firmware/llavero/README.md` para el flujo de prueba seguido).
+
+**Resultado: éxito end-to-end.** `llavero-0.1.1.bin` subido a
+`server/data/firmware/` en el VPS de producción, confirmado servido
+correctamente por `GET /device/firmware` (989 KB, `X-Fw-Version: 0.1.1`).
+El dispositivo, arrancando en `0.1.0`, conectó Wi-Fi, consultó
+`/device/wake` (imagen sin cambios) y `/device/firmware`, detectó
+`0.1.1 > 0.1.0`, y descargó y escribió el update sin errores (log: "OTA:
+actualización escrita OK. Arranca con el firmware nuevo en el próximo
+despertar.").
+
+**Hallazgo: `HTTPUpdate::update()` no reinicia el dispositivo
+automáticamente tras escribir el update, en esta implementación.** El
+firmware nuevo solo toma efecto en el siguiente reinicio real del chip —
+ya sea el deep sleep normal del propio ciclo (que ya es un reset completo
+del ESP32, no una pausa) o un reset manual. Esto no era una suposición sin
+probar: D-027 ya documentaba que `rebootOnUpdate(false)` se elegía a
+propósito, confiando en que el próximo despertar por temporizador bastaba
+— esta prueba confirma que ese razonamiento era correcto en la práctica,
+no solo en el código fuente de `Updater.cpp`. Se confirmó forzando un
+reset manual: el dispositivo arrancó corriendo `0.1.1` (log del chequeo de
+OTA del ciclo siguiente: "actual: 0.1.1"), confirmando que la escritura
+OTA había sido exitosa y persistente (sobrevivió el reset, como
+corresponde a un cambio de partición flasheada, no a estado en RAM).
+
+**`marcarFirmwareValido()` confirmado funcionando en la práctica.** Se
+verificó que `esp_ota_mark_app_valid_cancel_rollback()` se ejecuta en el
+ciclo posterior al update, cancelando cualquier rollback pendiente tras un
+ciclo funcional exitoso (Wi-Fi + `/device/wake` respondiendo bien) — el
+mecanismo nativo de rollback de ESP-IDF que D-027 había verificado contra
+`sdkconfig` y el código fuente de `Updater.cpp`/`esp_ota_ops.h` ahora
+queda confirmado también en hardware real, no solo por lectura de código.
+
+**Decisión tomada: no se agrega un reinicio forzado inmediato tras
+aplicar el OTA.** Se deja que el siguiente ciclo natural de
+deep-sleep/despertar aplique el cambio, tal como ya diseñaba D-027. Es más
+simple, ya está confirmado que funciona en la práctica (este hallazgo), y
+evita el riesgo de forzar un reinicio en un punto del código que nunca se
+había ejercitado con hardware real antes de esta prueba.
+
+**No se probó el caso de rollback (binario corrupto a propósito) en esta
+tarea — decisión, no pendiente por descuido.** El mecanismo de rollback es
+nativo de ESP-IDF (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, ya
+verificado contra el `sdkconfig` real en D-027), no código propio del
+proyecto con riesgo de bug nuevo que justifique la prueba. Provocarlo
+expondría el dispositivo real al riesgo ya conocido y aceptado en D-027
+(corte de energía a mitad de la escritura OTA) sin necesidad concreta. Si
+se quiere confirmar en el futuro, debe hacerse en hardware de repuesto, no
+en el dispositivo de entrega.
