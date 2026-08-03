@@ -203,17 +203,17 @@ def generar_desde_texto(texto: str) -> ResultadoPipeline:
     return ResultadoPipeline(buffer=buffer, checksum=calcular_checksum(buffer))
 
 
-def guardar(resultado: ResultadoPipeline, sleep_seconds: int = 86400) -> None:
+def guardar(resultado: ResultadoPipeline) -> None:
     """Escribe data/current.bin y data/current.json (D-009/D-014).
 
-    sleep_seconds usa el placeholder pedido (default 86400); el cálculo real
-    con Europe/Copenhagen (D-005) es tarea aparte.
+    No escribe sleep_seconds (D-026): dejó de ser metadata de la imagen —
+    /device/wake lo calcula fresco en cada request (Europe/Copenhagen), no
+    en el momento en que se guarda una imagen nueva.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CURRENT_BIN_PATH.write_bytes(resultado.buffer)
     metadata = {
         "checksum": resultado.checksum,
-        "sleep_seconds": sleep_seconds,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
     CURRENT_JSON_PATH.write_text(json.dumps(metadata, ensure_ascii=False, indent=2))

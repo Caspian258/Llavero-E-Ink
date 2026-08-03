@@ -1053,3 +1053,71 @@ el formulario en un celular real, confirmar que el token queda guardado y
 que `/device/wake`/`/device/firmware` dejan de responder 401 después) no
 se puede probar sin hardware real — ver `firmware/llavero/README.md` para
 el flujo de prueba manual actualizado.
+
+**Validado con hardware real:** flash borrada, portal cautivo levantado
+desde cero, SSID+password+token configurados en un solo formulario, ciclo
+completo (Wi-Fi → `/device/wake` sin 401 → descarga → pintado → chequeo
+de OTA) corrió limpio en el primer intento.
+
+## D-030 — Dos limpiezas menores en el servidor: sleep_seconds inerte y confusión de X-Fw-Version (2026-08-03)
+
+Sin impacto funcional — no cambia ningún comportamiento observable del
+servidor ni del dispositivo.
+
+**Limpieza 1: `sleep_seconds` inerte eliminado de `pipeline.py`.** D-026
+ya había movido el cálculo real de `sleep_seconds` a `device_wake()` en
+`main.py` (calculado fresco en cada request, no guardado como metadata),
+pero `pipeline.guardar()` seguía aceptando un parámetro `sleep_seconds`
+(default 86400) y escribiéndolo en `current.json` — un valor que
+`device_wake()` ya no lee desde D-026, código muerto que D-026
+explícitamente había dejado pendiente como "inconsistencia menor
+conocida, no un bug". Se quitó el parámetro de `guardar()` y la clave
+`sleep_seconds` del diccionario de metadata que escribe. Consecuencia en
+`server/scripts/probar_pipeline.py`: se quitó el argumento
+`--sleep-seconds` (ya no tenía nada que alimentar) y la llamada pasó de
+`pipeline.guardar(resultado, sleep_seconds=args.sleep_seconds)` a
+`pipeline.guardar(resultado)`. `current.json` ahora solo tiene `checksum`
+y `updated_at` — confirmado corriendo el script contra datos reales
+(texto de prueba, ver Verificación abajo).
+
+**Limpieza 2: los dos `X-Fw-Version` de `main.py` quedan diferenciados
+por nombre, no solo por comentario.** `/device/wake` y `/device/firmware`
+devuelven un header con el mismo nombre HTTP (`X-Fw-Version`, sin
+cambios — cambiarlo rompería el contrato ya implementado en el firmware
+real, D-023/D-027) pero con significados distintos:
+
+- `/device/wake`: versión **mínima de protocolo** que el servidor anuncia
+  como compatible (D-015) — un valor fijo de configuración (`FW_VERSION`,
+  variable de entorno), igual en cualquier request, independiente de qué
+  imagen esté cargada. **Corrección de precisión sobre el planteamiento
+  original de esta tarea:** el pedido describía este valor como "la
+  versión del firmware asociada a cuándo se procesó la imagen (viene de
+  current.json)" — eso es exactamente lo que D-015 dice que NO es
+  (`current.json` nunca guardó `X-Fw-Version`, y D-015 lo aclara
+  explícitamente: "no es metadata de la imagen"). Se documentó y nombró
+  con la semántica real de D-015, no con la del planteamiento.
+- `/device/firmware`: versión del **binario OTA** que se está sirviendo
+  (D-027), leída del nombre del archivo subido a mano a `FIRMWARE_DIR`.
+
+En el código, se introdujeron variables locales con nombres distintos
+justo donde se arma cada respuesta: `version_minima_protocolo` en
+`device_wake()` (antes se pasaba `FW_VERSION` directo al diccionario de
+headers, sin variable propia) y `version_firmware_disponible` en
+`device_firmware()` (antes `version`, nombre genérico que no distinguía
+el concepto). Cada una lleva un comentario en el punto de uso explicando
+qué es, qué NO es, y remitiendo a la otra función para el contraste — no
+solo un comentario aislado, sino una referencia cruzada en los dos
+sentidos.
+
+Verificación: `server/scripts/verificar_horario.py` sigue pasando los 9
+casos (no se tocó `horario.py`, y estos cambios no afectan el cálculo de
+`sleep_seconds`, solo dónde se escribía un valor que ya no se leía).
+`server/scripts/probar_pipeline.py --texto "..."` corrido con el venv de
+Python 3.12 ya usado en D-016 (`DEVICE_AUTH_TOKEN`/`TELEGRAM_BOT_TOKEN`/
+`TELEGRAM_WEBHOOK_SECRET` de prueba exportadas) confirma que sigue
+funcionando end-to-end: escribe `current.bin` (5000 bytes) y
+`current.json` con solo `checksum` y `updated_at`, sin `sleep_seconds`.
+Los tres archivos modificados (`app/pipeline.py`, `app/main.py`,
+`scripts/probar_pipeline.py`) parsean sin errores de sintaxis. Los
+archivos de prueba (`data/current.bin`, `data/current.json`) se borraron
+después de verificar, igual criterio que D-016 — no quedan versionados.

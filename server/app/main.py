@@ -209,12 +209,23 @@ def device_wake(x_device_token: str | None = Header(default=None)):
     # la imagen.
     sleep_seconds = horario.segundos_hasta_proximo_amanecer()
 
+    # X-Fw-Version acá es la versión MÍNIMA de protocolo que el servidor
+    # anuncia como compatible (D-015) — un valor fijo de configuración
+    # (FW_VERSION, variable de entorno), igual para cualquier request,
+    # independiente de qué imagen esté cargada en este momento. NO es la
+    # versión de ningún binario OTA: ese es el X-Fw-Version que devuelve
+    # /device/firmware más abajo (version_firmware_disponible), un
+    # concepto distinto que por historia comparte el mismo nombre de
+    # header — confirmado que generó confusión real leyendo logs del
+    # dispositivo, de ahí el nombre descriptivo de esta variable.
+    version_minima_protocolo = FW_VERSION
+
     return Response(
         content=buffer,
         media_type="application/octet-stream",
         headers={
             "X-Sleep-Seconds": str(sleep_seconds),
-            "X-Fw-Version": FW_VERSION,
+            "X-Fw-Version": version_minima_protocolo,
             "X-Image-Checksum": str(metadata["checksum"]),
         },
     )
@@ -238,11 +249,17 @@ def device_firmware(x_device_token: str | None = Header(default=None)):
     if encontrado is None:
         raise HTTPException(status_code=404, detail="no hay firmware disponible todavía")
 
-    ruta, version = encontrado
+    # version_firmware_disponible: la versión del BINARIO OTA que se está
+    # sirviendo (D-027), leída del nombre del archivo subido a mano. NO es
+    # la versión mínima de protocolo (esa es version_minima_protocolo en
+    # device_wake() arriba, D-015) — mismo header X-Fw-Version en los dos
+    # endpoints por el contrato ya implementado en el firmware
+    # (D-023/D-027), pero dos conceptos distintos.
+    ruta, version_firmware_disponible = encontrado
     return Response(
         content=ruta.read_bytes(),
         media_type="application/octet-stream",
-        headers={"X-Fw-Version": version},
+        headers={"X-Fw-Version": version_firmware_disponible},
     )
 
 
