@@ -170,6 +170,18 @@ String leerTokenDispositivo() {
   return token;
 }
 
+// Guarda el token en la misma clave que ya lee leerTokenDispositivo() — no
+// es una clave nueva, D-023 ya la definía (NVS_CLAVE_TOKEN = "deviceToken",
+// namespace NVS_NAMESPACE = "llavero"). El llamador (manejarGuardar) es
+// responsable de no invocar esto si el campo del formulario vino vacío: así
+// reconfigurar solo el Wi-Fi desde el portal no borra un token ya guardado.
+void guardarTokenDispositivo(const String &token) {
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putString(NVS_CLAVE_TOKEN, token);
+  prefs.end();
+  Serial.println("Token del dispositivo actualizado desde el portal cautivo.");
+}
+
 String leerUltimoChecksum() {
   prefs.begin(NVS_NAMESPACE, true);
   String checksum = prefs.getString(NVS_CLAVE_CHECKSUM, "");
@@ -498,12 +510,16 @@ String paginaConfiguracion() {
   cuerpo += "<h1>Llavero E-Ink</h1>";
   cuerpo += "<p class='subtitulo'>Conectado a <span class='chip'>" + String(AP_SSID) + "</span></p>";
   cuerpo += "<p>Ingresa el nombre y la contraseña de la red Wi-Fi a la que el ";
-  cuerpo += "llavero debe conectarse para descargar la imagen del día:</p>";
+  cuerpo += "llavero debe conectarse para descargar la imagen del día. El token ";
+  cuerpo += "del dispositivo es opcional: dejalo vacío para no tocar el que ya ";
+  cuerpo += "esté guardado.</p>";
   cuerpo += "<form method='POST' action='/guardar'>";
   cuerpo += "<label for='ssid'>Red (SSID)</label>";
   cuerpo += "<input id='ssid' type='text' name='ssid' maxlength='32' autocapitalize='off' autocorrect='off' required>";
   cuerpo += "<label for='pass'>Contraseña</label>";
   cuerpo += "<input id='pass' type='password' name='pass' maxlength='64'>";
+  cuerpo += "<label for='token'>Token del dispositivo (opcional)</label>";
+  cuerpo += "<input id='token' type='password' name='token' maxlength='128' autocapitalize='off' autocorrect='off' placeholder='Dejar vacío para no cambiarlo'>";
   cuerpo += "<button type='submit'>Guardar y reiniciar</button>";
   cuerpo += "</form>";
   return envolverPagina(cuerpo);
@@ -522,6 +538,15 @@ void manejarGuardar() {
   String ssid = webServer.arg("ssid");
   String pass = webServer.hasArg("pass") ? webServer.arg("pass") : "";
   guardarRedNueva(ssid, pass);
+
+  // El token es opcional: si el campo vino vacío, no se toca el valor que
+  // ya hubiera en NVS — así se puede reconfigurar solo el Wi-Fi sin tener
+  // que volver a pegar el token cada vez.
+  String token = webServer.hasArg("token") ? webServer.arg("token") : "";
+  if (token.length() > 0) {
+    guardarTokenDispositivo(token);
+  }
+
   credencialesRecibidas = true;
   webServer.send(200, "text/html; charset=utf-8",
                   envolverPagina("<h1>Guardado</h1><p>El llavero se reiniciará para conectarse a la red nueva.</p>"));

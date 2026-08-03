@@ -5,11 +5,13 @@ Proyecto PlatformIO del firmware final del dispositivo, separado de
 
 **Qué incluye hasta ahora:** conectividad Wi-Fi (`WiFiMulti`, redes
 guardadas en NVS, portal cautivo como fallback, backoff exponencial —
-D-010, D-011, D-020), un cliente HTTPS que consulta
-`GET https://caspiandomain.dev/device/wake` (D-008/D-009) tras conectar,
-valida el certificado TLS real (sin `setInsecure()`), y descarga el buffer
-de imagen solo si el checksum cambió (D-023), el pintado real de ese
-buffer en el panel e-ink con GxEPD2 (D-024) — solo cuando la imagen es
+D-010, D-011, D-020), el mismo portal cautivo con un campo opcional para
+configurar el `X-Device-Token` (D-029, sin necesitar
+`firmware/llavero-config-token/` como paso aparte), un cliente HTTPS que
+consulta `GET https://caspiandomain.dev/device/wake` (D-008/D-009) tras
+conectar, valida el certificado TLS real (sin `setInsecure()`), y descarga
+el buffer de imagen solo si el checksum cambió (D-023), el pintado real de
+ese buffer en el panel e-ink con GxEPD2 (D-024) — solo cuando la imagen es
 nueva, seguido siempre de `display.hibernate()` antes de dormir — y, desde
 D-027, actualización OTA vía `GET https://caspiandomain.dev/device/firmware`
 con rollback automático de ESP-IDF si el firmware nuevo no llega a
@@ -129,7 +131,13 @@ Portal cautivo activo. SSID: Llavero-Setup | IP: 192.168.4.1
    — esa es la confirmación visual de que el celular está hablando con el
    dispositivo correcto.
 4. Llenar el formulario con el SSID y password de la red real (ej. el
-   hotspot del celular) y tocar "Guardar y reiniciar".
+   hotspot del celular). El campo **Token del dispositivo** es opcional
+   (D-029) — en un dispositivo recién flasheado sin token guardado
+   todavía, completalo ahora con el `X-Device-Token` real (el mismo que
+   `DEVICE_AUTH_TOKEN` en el servidor, D-022) para no tener que volver a
+   abrir el portal después; si el dispositivo ya tenía un token guardado y
+   solo estás reconfigurando el Wi-Fi, dejalo vacío para no pisarlo. Tocar
+   "Guardar y reiniciar".
 5. Debe verse "Guardado. El llavero se reiniciará para conectarse a la
    red nueva."
 
@@ -150,7 +158,17 @@ Red nueva guardada en índice 0: <SSID que escribiste>
 Configuración nueva guardada. Reiniciando para reintentar con la lista actualizada...
 ```
 
-y el dispositivo se reinicia solo (log vuelve a `=== Llavero E-Ink... ===`).
+y, solo si llenaste el campo de token, una línea extra antes de la de
+reinicio:
+
+```
+Token del dispositivo actualizado desde el portal cautivo.
+```
+
+(si dejaste el campo de token vacío, esa línea no aparece — el valor que
+ya hubiera en NVS, si había alguno, queda intacto, D-029).
+
+El dispositivo se reinicia solo (log vuelve a `=== Llavero E-Ink... ===`).
 
 ### 3. Confirmar que guardó la red y conectó en el siguiente arranque
 
@@ -200,41 +218,32 @@ mockear de forma útil. Lo que sigue es el flujo que le toca al usuario.
 
 ### 1. Configurar el token real (`X-Device-Token`)
 
-**No hay todavía una forma de cargar esto sin recompilar, a diferencia de
-las redes Wi-Fi** (D-023) — el portal cautivo actual solo tiene campos de
-SSID/password. Hasta que se agregue esa interfaz (tarea futura), el paso
-más simple es flashear una vez un sketch mínimo separado que solo escribe
-el token en NVS, y después volver a flashear el firmware real:
+**Desde D-029, se configura en el mismo portal cautivo que el Wi-Fi** — ya
+no hace falta `firmware/llavero-config-token/` como paso aparte (esa
+herramienta queda en el repo como referencia, pero obsoleta, ver D-029).
 
-1. Guardar esto como `/tmp/set_token/src/main.cpp` (o cualquier carpeta
-   fuera del repo) con su propio `platformio.ini` mínimo
-   (`[env:seeed_xiao_esp32c3]` igual al de `firmware/llavero/`):
+- **Dispositivo recién flasheado (sin nada en NVS):** al hacer el "Flujo
+  de prueba manual" de arriba (sección "Conectarse al AP del portal
+  cautivo desde un celular"), completá también el campo **Token del
+  dispositivo** en el mismo formulario junto con el SSID y la password —
+  un solo paso, un solo reinicio. Ese es el caso normal para la primera
+  prueba con hardware real.
+- **Dispositivo que ya tiene Wi-Fi configurado y arranca conectando
+  directo (nunca llega a mostrar el portal):** el portal cautivo solo se
+  levanta si no hay redes guardadas o si `WiFiMulti` no logra conectar
+  dentro del timeout (D-011/D-020) — no hay todavía un mecanismo para
+  forzarlo a abrirse a demanda (ej. botón físico), así que para
+  cambiar/agregar el token en un dispositivo que ya conecta bien hay que
+  provocar ese fallo a propósito: apagar temporalmente el hotspot/red
+  guardada para que `WiFiMulti.run()` agote los 15 s y caiga al portal, y
+  ahí volver a enviar el formulario con el **mismo SSID/password de
+  siempre** (para no perder la red guardada, D-020: `guardarRedNueva()`
+  actualiza en el mismo índice si el SSID ya existía) más el token nuevo
+  en el campo correspondiente.
 
-   ```cpp
-   #include <Arduino.h>
-   #include <Preferences.h>
-
-   void setup() {
-     Serial.begin(115200);
-     delay(2000);
-     Preferences prefs;
-     prefs.begin("llavero", false);
-     prefs.putString("deviceToken", "PEGAR_AQUI_EL_TOKEN_REAL_DE_PRODUCCION");
-     prefs.end();
-     Serial.println("Token guardado en NVS.");
-   }
-
-   void loop() {}
-   ```
-
-2. `pio run --target upload` desde esa carpeta temporal, confirmar por
-   `pio device monitor` que imprime "Token guardado en NVS."
-3. Volver a `firmware/llavero/` y `pio run --target upload` para
-   reflashear el firmware real — el token queda en NVS, sobrevive el
-   reflasheo del firmware (NVS es una partición separada del código).
-
-Este token es el mismo que ya generaste para `server/.env`
-(`DEVICE_AUTH_TOKEN` en el VPS, D-022) — tienen que coincidir.
+El token que se ingresa acá es el mismo que ya generaste para
+`server/.env` (`DEVICE_AUTH_TOKEN` en el VPS, D-022) — tienen que
+coincidir.
 
 ### 2. Escenario: imagen nueva (descarga Y pinta)
 

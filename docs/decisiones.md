@@ -993,3 +993,63 @@ expondría el dispositivo real al riesgo ya conocido y aceptado en D-027
 (corte de energía a mitad de la escritura OTA) sin necesidad concreta. Si
 se quiere confirmar en el futuro, debe hacerse en hardware de repuesto, no
 en el dispositivo de entrega.
+
+## D-029 — Token del dispositivo configurable desde el portal cautivo (2026-08-03)
+
+Cierra la brecha documentada en D-023: hasta ahora, el `X-Device-Token`
+solo se podía cargar sin recompilar el firmware real flasheando aparte
+`firmware/llavero-config-token/`, un sketch mínimo separado que solo
+escribía la clave en NVS. El portal cautivo (D-011/D-020) ya resolvía
+exactamente este problema para las redes Wi-Fi; esta tarea extiende el
+mismo formulario para que también resuelva el token, en el mismo paso.
+
+**Qué cambió en `firmware/llavero/src/main.cpp`.** Un campo nuevo
+`token` (`type="password"`, igual criterio que el campo `pass` ya
+existente — D-013: nunca en texto plano innecesariamente) en el mismo
+`<form>` que ya postea a `/guardar`, junto a una función nueva,
+`guardarTokenDispositivo(const String &token)`, que escribe en la **misma**
+clave que ya leía `leerTokenDispositivo()` desde D-023
+(`NVS_CLAVE_TOKEN = "deviceToken"`, namespace `NVS_NAMESPACE = "llavero"`)
+— no se agregó ninguna clave nueva de NVS.
+
+**El campo es opcional, con la semántica que pedía la tarea: vacío no
+sobreescribe.** `manejarGuardar()` solo llama a `guardarTokenDispositivo()`
+si `webServer.arg("token").length() > 0`; si el campo llega vacío, la
+función ni se invoca, y el valor que ya hubiera en NVS (si había alguno)
+queda intacto. Esto permite reconfigurar solo el Wi-Fi desde el portal
+—el caso más común, ej. agregar una red nueva o corregir una password—
+sin tener que volver a pegar el token cada vez que se reabre el portal.
+El guardado de redes (`guardarRedNueva()`) no se tocó — el token es un
+campo adicional en el mismo formulario, no un flujo aparte.
+
+**Límite conocido, no resuelto acá: no hay forma de forzar el portal a
+abrirse a demanda.** El portal cautivo solo se levanta si no hay redes
+guardadas o si `WiFiMulti` no logra conectar dentro del timeout
+(D-011/D-020) — comportamiento que esta tarea no tocó. Para un
+dispositivo que ya conecta bien y necesita solo actualizar el token (sin
+tocar el Wi-Fi), la única vía documentada es provocar ese fallo a
+propósito (apagar temporalmente la red guardada) y reenviar el mismo
+SSID/password de siempre junto con el token nuevo — `guardarRedNueva()`
+ya actualiza en el mismo índice si el SSID coincide (D-020), así que no
+se pierde la red guardada. Un mecanismo dedicado (botón físico, comando
+por Serial) para reabrir el portal a demanda queda fuera del alcance de
+esta tarea — no se implementó porque el pedido explícito era solo agregar
+el campo al formulario existente, sin tocar cuándo se levanta el portal.
+
+**`firmware/llavero-config-token/` queda obsoleta.** No se necesita más
+para el flujo normal de configuración: todo lo que hacía (escribir
+`deviceToken` en NVS) ahora lo cubre el portal cautivo en el mismo paso
+que el Wi-Fi. Se deja el directorio tal cual en el repo, sin borrar, por
+si hace falta como referencia o como camino de emergencia (ej. si el
+portal cautivo mismo tuviera un bug y hiciera falta escribir el token por
+otra vía) — no se tocó ningún archivo dentro de
+`firmware/llavero-config-token/` en esta tarea.
+
+Verificación: `pio run` dentro de `firmware/llavero/` compila limpio (0
+errores, 0 warnings) en una recompilación completa desde cero. Flash subió
+de 974108 a 974902 bytes (74.3% → 74.4%, +794 bytes por el campo HTML y la
+función de guardado) — margen amplio sin cambios. El flujo real (llenar
+el formulario en un celular real, confirmar que el token queda guardado y
+que `/device/wake`/`/device/firmware` dejan de responder 401 después) no
+se puede probar sin hardware real — ver `firmware/llavero/README.md` para
+el flujo de prueba manual actualizado.
