@@ -53,7 +53,7 @@ constexpr const char *URL_DEVICE_FIRMWARE = "https://caspiandomain.dev/device/fi
 // la que se compara contra /device/firmware para decidir si hay una
 // actualización real que aplicar (D-027). Subir a mano en cada release,
 // junto con el nombre del .bin que se sube al servidor — ver README.
-constexpr const char *FW_VERSION = "0.1.0";
+constexpr const char *FW_VERSION = "0.1.1";
 
 // Placeholder para cuando no hay token guardado en NVS todavía. Nunca es el
 // token real de producción — ese vive solo en NVS del dispositivo, jamás en

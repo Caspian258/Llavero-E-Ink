@@ -318,84 +318,195 @@ nuevo en el siguiente despertar, son todo comportamiento del chip real.
 Ver `server/README.md` ("OTA: subir un firmware nuevo") para el lado del
 servidor.
 
-### 1. Preparar una versión "nueva"
+Lo que sigue es el flujo concreto para la **primera prueba real**
+(`0.1.0` → `0.1.1`), con los mismos comandos que corresponden a cualquier
+release futuro — solo cambian los números de versión.
 
-En `firmware/llavero/src/main.cpp`, subir `FW_VERSION` (ej. de `"0.1.0"`
-a `"0.2.0"`) — es lo único que hace falta para simular una actualización
-real. Opcionalmente, agregar algo visible al log (ej. un
-`Serial.println("SOY LA VERSION NUEVA")` en `setup()`) para confirmar a
-simple vista, por el monitor serie, que el dispositivo terminó corriendo
-el binario nuevo y no el viejo.
+### 0. Estado de partida (ya preparado)
+
+`firmware/llavero/src/main.cpp` ya tiene `FW_VERSION = "0.1.1"` — un
+cambio **sin commitear a propósito**, es la versión de prueba para forzar
+que el chequeo de OTA detecte una actualización disponible. Ya se corrió
+`pio run` y compiló limpio (0 errores, 0 warnings; Flash 74.3%, RAM
+15.6% — igual que D-027, el cambio de versión no agrega código). El
+binario resultante:
+
+```
+firmware/llavero/.pio/build/seeed_xiao_esp32c3/firmware.bin
+```
+
+**es la versión "nueva" (0.1.1)** — este es el archivo que se sube al
+servidor en el paso 2. No hace falta recompilarlo todavía.
+
+### 1. Flashear la versión VIEJA (0.1.0) primero
+
+El punto de la prueba es que el dispositivo arranque en la versión
+**vieja**, detecte la nueva disponible en el servidor, la descargue sola,
+la aplique, y confirme que sigue funcionando — flashear directo la 0.1.1
+no probaría nada de esto.
+
+Como el cambio a `0.1.1` está en el árbol de trabajo sin commitear, usa
+`git stash` para compilar y flashear la 0.1.0 sin perder ese cambio:
 
 ```bash
 cd firmware/llavero
-pio run
-```
-
-### 2. Flashear la versión VIEJA primero, dejarla corriendo
-
-Para que haya algo de qué "actualizar", primero flashear la versión
-**vieja** (`FW_VERSION = "0.1.0"`, sin el cambio del paso 1) y dejar que
-complete al menos un ciclo exitoso (Wi-Fi + `/device/wake`) — así queda
-marcada válida ante el bootloader antes de intentar el OTA.
-
-```bash
+git stash push -- src/main.cpp    # main.cpp vuelve a FW_VERSION="0.1.0" temporalmente
 pio run --target upload
 pio device monitor --baud 115200
 ```
 
-Confirmar en el log que llega hasta `Durmiendo <N> segundos` sin errores.
+Dejalo correr hasta ver `Durmiendo <N> segundos` sin errores en el log —
+eso confirma un ciclo completo exitoso (Wi-Fi + `/device/wake`), que es
+lo que hace que `marcarFirmwareValido()` marque la 0.1.0 como válida ante
+el bootloader (condición para que el rollback no se dispare por otro
+motivo cuando entre en juego la 0.1.1).
 
-### 3. Subir la versión nueva al servidor (sin flashearla al dispositivo)
+Cortá el monitor (Ctrl+C) y restaurá el cambio a 0.1.1:
 
-Compilar la versión con `FW_VERSION` subido (paso 1) y subir **ese**
-binario al servidor siguiendo `server/README.md` — el dispositivo sigue
-corriendo la versión vieja, va a ser él quien se actualice solo.
+```bash
+git stash pop                     # main.cpp vuelve a tener FW_VERSION="0.1.1"
+pio run                           # recompila el binario 0.1.1, por si "upload" lo había pisado
+```
 
-### 4. Dejar que el dispositivo se actualice solo
+### 2. Subir el binario 0.1.1 al servidor
 
-Provocar el siguiente despertar (esperar el `X-Sleep-Seconds` real, o
-resetear a mano). Log esperado:
+Mismo proceso manual ya documentado en `server/README.md`
+("OTA: subir un firmware nuevo"), con los valores concretos de esta
+prueba:
 
+```bash
+cp firmware/llavero/.pio/build/seeed_xiao_esp32c3/firmware.bin /tmp/llavero-0.1.1.bin
+scp /tmp/llavero-0.1.1.bin llavero@<IP-DEL-VPS>:/home/llavero/Llavero-E-Ink/server/data/firmware/
+```
+
+Si el `scp` se hizo como `root`, ajustar permisos (ver `server/README.md`):
+
+```bash
+ssh llavero@<IP-DEL-VPS> chown llavero:llavero /home/llavero/Llavero-E-Ink/server/data/firmware/llavero-0.1.1.bin
+```
+
+Confirmar que el endpoint ya lo sirve, antes de esperar al dispositivo:
+
+```bash
+curl -i https://caspiandomain.dev/device/firmware -H "X-Device-Token: <token real>"
+# 200, header X-Fw-Version: 0.1.1
+```
+
+No hace falta reiniciar `llavero.service` — el endpoint lee el
+directorio en cada request (ver `server/README.md`).
+
+### 3. Dejar que el dispositivo (todavía en 0.1.0) detecte y aplique la actualización
+
+Provocá el siguiente despertar (esperar el `X-Sleep-Seconds` real que
+haya quedado durmiendo, o un reset manual del dispositivo). Log completo
+esperado, en orden:
+
+**a. Ciclo de imagen normal** (sin relación con OTA, corre siempre primero):
 ```
 Conectado a <SSID>, IP <IP>
 Consultando https://caspiandomain.dev/device/wake ...
 Respuesta OK. X-Fw-Version=0.1.0, X-Sleep-Seconds=<N>, X-Image-Checksum=<hex>
 Imagen sin cambios, no se descarga.
+```
+(El `X-Fw-Version=0.1.0` de esta línea es el de `/device/wake` — D-015,
+la versión mínima de protocolo que anuncia el servidor, no cambia con
+este release. No confundir con la versión del binario OTA del paso
+siguiente.)
+
+**b. Detección de versión nueva:**
+```
 OTA: consultando https://caspiandomain.dev/device/firmware ...
-OTA: versión disponible en el servidor: 0.2.0 (actual: 0.1.0)
+OTA: versión disponible en el servidor: 0.1.1 (actual: 0.1.0)
+```
+
+**c. Descarga y aplicación** (un solo log de inicio; `httpUpdate.update()`
+hace descarga + escritura de partición + `esp_ota_set_boot_partition()`
+internamente, sin logs intermedios propios del firmware — el siguiente
+log solo aparece si termina bien):
+```
 OTA: versión nueva detectada, descargando y aplicando...
 OTA: actualización escrita OK. Arranca con el firmware nuevo en el próximo despertar.
+```
+
+**d. "Reinicio":** no hay un reinicio inmediato (`rebootOnUpdate(false)`,
+D-027) — el dispositivo sigue el flujo normal hasta dormir:
+```
 Durmiendo <N> segundos
 ```
+y entra en deep sleep. El "reinicio" real ocurre recién en el siguiente
+despertar por temporizador (el deep sleep en ESP32 ya es un reset
+completo del chip; el bootloader relee `otadata` como en cualquier
+arranque).
 
-Nota: no hay reinicio inmediato a propósito (ver comentario en
-`verificarActualizacionFirmware()`) — el dispositivo duerme normal y el
-firmware nuevo arranca recién en el **próximo** despertar por temporizador,
-no en este ciclo.
+### 4. Confirmar que arrancó con la versión nueva y quedó marcada válida
 
-### 5. Confirmar que arrancó con el firmware nuevo
-
-En el siguiente despertar, el log debería mostrar el mensaje que se haya
-agregado en el paso 1 (ej. "SOY LA VERSION NUEVA"), y la consulta de OTA
-ya no debería encontrar nada nuevo:
-
+En el **siguiente** despertar (el que sigue al de arriba), el log debe
+volver a mostrar el chequeo de OTA, pero ahora sin nada que aplicar:
 ```
 OTA: consultando https://caspiandomain.dev/device/firmware ...
-OTA: versión disponible en el servidor: 0.2.0 (actual: 0.2.0)
+OTA: versión disponible en el servidor: 0.1.1 (actual: 0.1.1)
 OTA: no hay versión más nueva. Nada que hacer.
 ```
 
-### 6. Probar el rollback (opcional, requiere provocar un fallo real)
+Ese `actual: 0.1.1` (antes decía `actual: 0.1.0`) es la confirmación por
+log de que el dispositivo arrancó con el binario nuevo.
 
-Para confirmar el rollback automático de ESP-IDF sin reimplementarlo:
-subir a propósito un binario roto (ej. un archivo `.bin` que no sea un
-firmware válido, o una versión que crashee apenas arranca antes de llegar
-a completar un ciclo Wi-Fi + `/device/wake`) con una versión mayor.
-Esperado: el dispositivo lo descarga y lo arranca, crashea/reinicia antes
-de llamar a `marcarFirmwareValido()`, y el bootloader de ESP-IDF revierte
-solo a la versión anterior en el siguiente arranque — confirmable viendo
-que el log vuelve a mostrar la versión vieja sin que nadie haya
-reflasheado nada por USB. Este paso puede dejar el dispositivo en un
-ciclo de reinicios hasta que el rollback se complete; tener el monitor
-serie abierto para verlo en vivo.
+`marcarFirmwareValido()` no imprime nada en el caso de éxito (solo
+loggea si falla) — la confirmación de que quedó marcada válida ante el
+bootloader es indirecta pero concluyente: si este mismo despertar llega
+hasta `Durmiendo <N> segundos` sin que el dispositivo haya vuelto a
+reiniciarse solo antes de eso, es porque `esp_ota_mark_app_valid_cancel_rollback()`
+ya corrió (se llama siempre que `consultarServidor()` tiene éxito, antes
+del chequeo de OTA) y el bootloader no tiene ningún rollback pendiente
+que disparar.
+
+**Confirmación visual en el panel:** ninguna — un update de firmware no
+toca la pantalla por sí solo (solo el ciclo de imagen la repinta, y acá
+el checksum no cambió). La confirmación de esta prueba es enteramente
+por log serie.
+
+### 5. Probar el caso de falla — rollback (opcional, compromete el dispositivo brevemente)
+
+Este paso es aparte y **no hace falta para dar por buena la prueba
+anterior** — sirve para confirmar que el rollback automático de ESP-IDF
+funciona de verdad ante un firmware roto, no solo que el camino feliz
+funciona.
+
+**Qué hace**: subir al servidor un binario con una versión numérica mayor
+que la que esté corriendo el dispositivo en ese momento, pero que crashee
+o se reinicie antes de completar un ciclo Wi-Fi + `/device/wake` (por
+ejemplo, un `main.cpp` de prueba que suba `FW_VERSION` y llame a
+`abort()` o entre en un `while(true) {}` al principio de `setup()`, antes
+de intentar conectar Wi-Fi). El dispositivo lo va a descargar y arrancar
+igual que en el paso 3 (no hay forma de que el chequeo de OTA distinga
+un binario roto de uno bueno antes de ejecutarlo) — la protección está en
+el bootloader, no en el firmware.
+
+**Cómo prepararlo:**
+
+```bash
+cd firmware/llavero
+git stash push -- src/main.cpp   # deja main.cpp en 0.1.1 aparte, para no perderlo
+```
+
+Editar `src/main.cpp` (la copia que quedó en el árbol tras el stash, la
+que compiló para 0.1.0) para subir `FW_VERSION` a algo mayor que lo que
+el dispositivo tenga corriendo en ese momento (ej. `"0.1.2"`) y agregar al
+principio de `setup()`, antes de `Serial.begin(...)`, algo como
+`while (true) {}` para forzar que nunca llegue a completar un ciclo.
+Compilar y subir ese binario al servidor con el nombre correspondiente
+(`llavero-0.1.2.bin`), siguiendo el mismo proceso del paso 2. Al terminar
+la prueba, descartar esa copia (`git checkout -- src/main.cpp` o similar)
+y `git stash pop` para recuperar la 0.1.1 real.
+
+**Qué esperar:** el dispositivo descarga y arranca el binario roto,
+nunca llega a loggear nada (se cuelga antes de `Serial.begin`) y el
+watchdog/el siguiente reset lo devuelve al bootloader, que —al no haber
+recibido `esp_ota_mark_app_valid_cancel_rollback()` de esa partición—
+revierte solo a la partición anterior (la 0.1.1 que sí estaba marcada
+válida). Confirmable viendo que, tras uno o unos pocos reinicios
+automáticos, el monitor serie vuelve a mostrar el log normal de la 0.1.1
+sin que nadie haya reflasheado nada por USB. Este paso puede dejar al
+dispositivo en un ciclo de reinicios breve hasta que el rollback se
+complete solo; conviene tener el monitor serie abierto para verlo en
+vivo y confirmar que se recupera sin intervención manual.
